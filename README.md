@@ -30,7 +30,7 @@ press `SPC` to pause; press `+` to like.
 
 ## Quick start
 
-You need `mpv` installed (and `yt-dlp` is recommended).
+You need `mpv` and `yt-dlp` installed.
 
 Drop this in your Emacs config:
 

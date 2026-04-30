@@ -62,9 +62,12 @@
 ;; so the unofficial-OAuth path is currently unreliable.  The cookie
 ;; flow is robust and is used by `ytmusicapi' and `ytermusic' alike.
 ;;
-;; Required external program: `mpv' with its built-in `ytdl_hook' Lua
-;; script (the default).  Install `yt-dlp' for newer YouTube payloads;
-;; mpv will pick it up automatically when present on PATH.
+;; Required external programs: `mpv' and `yt-dlp'.  mpv ships a
+;; bundled `ytdl_hook' Lua script (enabled by default) that uses
+;; `yt-dlp' on PATH to resolve YouTube URLs into playable audio
+;; streams.  Without `yt-dlp' on PATH, playback will silently fail
+;; (mpv will log "Failed to recognize file format"); see the buffer
+;; opened by `youtube-music-show-log'.
 
 ;;; Code:
 
