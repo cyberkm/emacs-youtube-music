@@ -679,9 +679,11 @@ On the Now Playing line, stop playback instead."
 
 ;;;###autoload
 (defun youtube-music-stop ()
-  "Stop playback and clear the playlist."
+  "Stop playback by pausing and resetting position to the start.
+Leaves the current playlist intact."
   (interactive)
-  (youtube-music--send '("stop")))
+  (youtube-music--send '("seek" 0 "absolute"))
+  (youtube-music--send '("set" "pause" "yes")))
 
 ;;;###autoload
 (defun youtube-music-toggle-shuffle ()
