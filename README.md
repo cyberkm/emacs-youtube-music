@@ -42,13 +42,26 @@ Drop this in your Emacs config:
   :config (youtube-music-modeline-mode 1))
 ```
 
-Then:
+### First time only — log in
 
-1. `C-c y` to open the status buffer.
-2. Press `a` then `l` to log in. A buffer appears with simple
+1. `C-c y` (or `M-x youtube-music`) to open the status buffer.
+2. Press `a` then `l`. A buffer appears with step-by-step
    instructions for grabbing your YouTube Music cookie from your
    browser. Paste, `C-c C-c`, done.
-3. Press `s` to search and queue a song, or `l` for your library.
+
+That's it. The cookie is saved to disk and loaded automatically
+on every Emacs session afterwards.
+
+### After that — just use it
+
+- `C-c y` (or `M-x youtube-music`) — open the status buffer.
+- `s` to search and queue a song.
+- `l` for your library (liked songs, saved playlists).
+- `?` to see every command.
+
+The `C-c y` binding is whatever you set in `:bind` above; the
+underlying entry-point command is `M-x youtube-music` — bind it
+however you like.
 
 That's it.
 
@@ -58,7 +71,7 @@ Inside the status buffer:
 
 | Key       | Action                                 |
 | --------- | -------------------------------------- |
-| `?`       | Open the command menu                  |
+| `?` / `h` | Open the command menu                  |
 | `SPC`     | Play / pause                           |
 | `n` / `p` | Next / previous track                  |
 | `x`       | Stop                                   |
@@ -75,7 +88,7 @@ Inside the status buffer:
 | `g`       | Refresh                                |
 | `q`       | Bury the buffer                        |
 
-Don't memorise any of it. Press `?` and pick from the menu.
+Don't memorise any of it. Press `?` (or `h`) and pick from the menu.
 
 ## What's the deal with the cookie
 
@@ -92,8 +105,6 @@ press `a` then `o` from the status buffer); that deletes the
 credentials file.
 
 ## Status
-
-Early development. Not on MELPA yet but submission-ready.
 
 If something breaks or feels wrong, file an issue.
 
