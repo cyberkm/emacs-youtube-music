@@ -56,11 +56,12 @@ Deferred:
 
 ## Usage
 
-1. `M-x youtube-music-login` — paste the `Cookie` header from a
-   browser session at `https://music.youtube.com` (the buffer has
-   step-by-step instructions). Saved to
+1. `M-x youtube-music` (or `C-c y`) — pop the status buffer.
+2. Press `a` to open the auth transient, then `l` to log in. A
+   buffer opens with step-by-step instructions for grabbing the
+   `Cookie` header from a browser session at
+   `https://music.youtube.com`. Saved to
    `~/.config/youtube-music/credentials.eld` with mode `0600`.
-2. `M-x youtube-music` (or `C-c y`) — pop the status buffer.
 3. Press `?` for the dispatch menu, or use the bindings directly.
 
 ### Buffer keybindings
