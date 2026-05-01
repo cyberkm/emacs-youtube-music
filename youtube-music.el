@@ -153,6 +153,14 @@ Recognised tokens:
   '((t :inherit error))
   "Face for the thumbs-down indicator on a track.")
 
+(defface youtube-music-auth-ok
+  '((t :inherit success))
+  "Face for the signed-in status indicator.")
+
+(defface youtube-music-auth-error
+  '((t :inherit error :weight bold))
+  "Face for the signed-out status indicator.")
+
 (defface youtube-music-progress-fill
   '((t :inherit font-lock-keyword-face))
   "Face for the filled portion of the progress bar.")
@@ -215,6 +223,19 @@ fetch (or play your liked songs, which seeds it as a side effect).")
   "Hash-set of videoIds the user disliked in the current session.
 We cannot query the server for disliked tracks the way we do for
 liked ones, so this is session-local.  Cleared on quit/logout.")
+
+(defvar youtube-music--auth-state 'unknown
+  "Server-reported auth state: `logged-in', `logged-out', or `unknown'.
+Updated whenever a youtubei response arrives, by inspecting the
+`responseContext.serviceTrackingParams.GFEEDBACK.logged_in' field.")
+
+(defvar youtube-music--account-name nil
+  "Cached display name for the currently signed-in account, or nil.")
+
+;; Forward declaration: the defcustom lives in the Authentication
+;; section further down, but the status renderer above needs the
+;; symbol declared so byte-compile is happy.
+(defvar youtube-music-credentials-file)
 
 ;;;; Lifecycle
 
@@ -527,6 +548,7 @@ EVENT is the `process-status' string supplied by Emacs."
         (youtube-music--render-now-playing)
         (youtube-music--render-queue)
         (youtube-music--render-sources)
+        (youtube-music--render-status)
         (youtube-music--render-help)
         (goto-char (point-min))
         (forward-line (1- line))
@@ -619,8 +641,45 @@ the currently-playing entry is highlighted with a leading arrow."
 (defun youtube-music--render-sources ()
   "Render the Sources section."
   (youtube-music--insert-heading "── Sources ──")
-  (insert "  /  Search       l  Library (liked / playlists)\n")
-  (insert "  u  Play URL     e  Enqueue URL\n")
+  (insert "  s  Search (enqueue)    S  Search (replace)\n")
+  (insert "  u  Play URL            e  Enqueue URL\n")
+  (insert "  l  Library (liked, playlists, home)\n")
+  (insert "\n"))
+
+(defun youtube-music--render-status ()
+  "Render the auth status section.
+Distinguishes three states:
+  signed in              → server accepts our cookie,
+  cookie expired         → credentials file exists but server rejects,
+  not signed in (fresh)  → no credentials saved yet."
+  (youtube-music--insert-heading "── Status ──")
+  (let ((have-creds (file-exists-p youtube-music-credentials-file)))
+    (pcase youtube-music--auth-state
+      ('logged-in
+       (insert "  "
+               (propertize "● signed in" 'face 'youtube-music-auth-ok)
+               (if youtube-music--account-name
+                   (format " as %s" youtube-music--account-name)
+                 "")
+               "\n"))
+      ('logged-out
+       (cond
+        (have-creds
+         (insert "  "
+                 (propertize "⚠ cookie expired" 'face 'youtube-music-auth-error)
+                 " — run `a' then `l' to paste a fresh cookie\n"))
+        (t
+         (insert "  "
+                 (propertize "○ not signed in" 'face 'youtube-music-auth-error)
+                 " — run `a' then `l' to log in for the first time\n"))))
+      (_
+       (cond
+        (have-creds
+         (insert "  ● auth state unknown — run any library command to probe\n"))
+        (t
+         (insert "  "
+                 (propertize "○ not signed in" 'face 'youtube-music-auth-error)
+                 " — run `a' then `l' to log in\n"))))))
   (insert "\n"))
 
 (defun youtube-music--render-help ()
@@ -848,7 +907,7 @@ file is created with mode 0600."
   (and youtube-music--cookie t))
 
 ;;;###autoload
-(defun youtube-music-login ()
+(defun youtube-music-login-paste ()
   "Open a buffer for pasting the YouTube Music cookie header.
 Press \\<youtube-music-login-mode-map>\\[youtube-music-login-finish] to save, \
 \\[youtube-music-login-cancel] to cancel."
@@ -871,6 +930,39 @@ Press \\<youtube-music-login-mode-map>\\[youtube-music-login-finish] to save, \
       (goto-char (point-max)))
     (pop-to-buffer buf)))
 
+(defun youtube-music--apply-cookie (cookie source)
+  "Save COOKIE to disk, set in-memory state, kick off auth probe.
+SOURCE is a label used in the success message."
+  (youtube-music--credentials-save (list :cookie cookie))
+  (setq youtube-music--cookie cookie
+        youtube-music--sapisid (youtube-music--extract-sapisid cookie)
+        youtube-music--account-name nil)
+  (youtube-music-fetch-account-info)
+  (youtube-music--rerender)
+  (message "youtube-music: logged in via %s" source))
+
+;;;###autoload
+(defun youtube-music-login ()
+  "Log in to YouTube Music.
+Probes every browser yt-dlp can read.  If exactly one yields a
+usable cookie, uses it.  If several do, prompts you to pick.  If
+none, falls back to the manual paste flow."
+  (interactive)
+  (let* ((browsers '("firefox" "chromium" "brave" "chrome"))
+         (hits (and (executable-find "yt-dlp")
+                    (progn (message "youtube-music: probing browsers...")
+                           (cl-loop for b in browsers
+                                    for c = (youtube-music--extract-cookie-via-browser b)
+                                    when c collect (cons b c))))))
+    (pcase (length hits)
+      (0 (youtube-music-login-paste))
+      (1 (youtube-music--apply-cookie (cdr (car hits)) (car (car hits))))
+      (_ (let* ((choice (completing-read
+                         "Multiple browsers signed in — pick one: "
+                         (mapcar #'car hits) nil t))
+                (cookie (cdr (assoc choice hits))))
+           (when cookie (youtube-music--apply-cookie cookie choice)))))))
+
 (defun youtube-music-login-finish ()
   "Save the cookie pasted in the current login buffer."
   (interactive)
@@ -887,7 +979,10 @@ Press \\<youtube-music-login-mode-map>\\[youtube-music-login-finish] to save, \
      (t
       (youtube-music--credentials-save (list :cookie cookie))
       (setq youtube-music--cookie cookie
-            youtube-music--sapisid (youtube-music--extract-sapisid cookie))
+            youtube-music--sapisid (youtube-music--extract-sapisid cookie)
+            youtube-music--account-name nil)
+      (youtube-music-fetch-account-info)
+      (youtube-music--rerender)
       (message "youtube-music: logged in (cookie saved to %s)"
                youtube-music-credentials-file)
       (kill-buffer (current-buffer))))))
@@ -897,6 +992,54 @@ Press \\<youtube-music-login-mode-map>\\[youtube-music-login-finish] to save, \
   (interactive)
   (kill-buffer (current-buffer)))
 
+;;;; Browser-based login (auto-extract via yt-dlp)
+
+(defconst youtube-music--auth-cookie-names
+  '("SAPISID" "__Secure-1PAPISID" "__Secure-3PAPISID"
+    "SID"     "__Secure-1PSID"    "__Secure-3PSID"
+              "__Secure-1PSIDTS"  "__Secure-3PSIDTS"
+    "HSID" "SSID" "APISID"
+    "LOGIN_INFO" "VISITOR_INFO1_LIVE" "VISITOR_PRIVACY_METADATA"
+    "PREF" "YSC")
+  "Cookie names kept when extracting from a browser.
+yt-dlp dumps ~170 cookies under youtube.com, which is too large
+for the API server to accept (HTTP 413).  We keep only those that
+matter for authentication.")
+
+(defun youtube-music--extract-cookie-via-browser (browser)
+  "Use yt-dlp to dump cookies from BROWSER; return a Cookie header or nil.
+Only the names in `youtube-music--auth-cookie-names' are kept."
+  (let ((tmp (make-temp-file "ytmusic-cookies-" nil ".txt")))
+    (unwind-protect
+        (progn
+          (with-temp-file tmp (insert "# Netscape HTTP Cookie File\n"))
+          (call-process "yt-dlp" nil nil nil
+                        "--cookies-from-browser" browser
+                        "--cookies" tmp
+                        "--simulate" "--quiet" "--ignore-errors"
+                        "--skip-download"
+                        "https://music.youtube.com")
+          (with-temp-buffer
+            (insert-file-contents tmp)
+            (goto-char (point-min))
+            (let (parts)
+              (while (not (eobp))
+                (let ((line (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))))
+                  (unless (or (string-empty-p line) (string-prefix-p "#" line))
+                    (let ((fields (split-string line "\t")))
+                      (when (and (>= (length fields) 7)
+                                 (string-match-p "youtube\\.com" (nth 0 fields))
+                                 (member (nth 5 fields)
+                                         youtube-music--auth-cookie-names))
+                        (push (format "%s=%s" (nth 5 fields) (nth 6 fields))
+                              parts)))))
+                (forward-line 1))
+              (let ((cookie (mapconcat #'identity (nreverse parts) "; ")))
+                (and (youtube-music--extract-sapisid cookie) cookie)))))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+
 ;;;###autoload
 (defun youtube-music-logout ()
   "Forget the saved YouTube Music credentials.
@@ -905,7 +1048,10 @@ Deletes `youtube-music-credentials-file' and clears in-memory cookie."
   (when (file-exists-p youtube-music-credentials-file)
     (delete-file youtube-music-credentials-file))
   (setq youtube-music--cookie nil
-        youtube-music--sapisid nil)
+        youtube-music--sapisid nil
+        youtube-music--auth-state 'logged-out
+        youtube-music--account-name nil)
+  (youtube-music--rerender)
   (message "youtube-music: logged out"))
 
 ;;;###autoload
@@ -928,9 +1074,8 @@ Deletes `youtube-music-credentials-file' and clears in-memory cookie."
   "Manage YouTube Music authentication."
   :description #'youtube-music--auth-header
   ["Authentication"
-   ("l" "Login (paste cookie)" youtube-music-login)
-   ("o" "Logout"               youtube-music-logout)
-   ("s" "Status"               youtube-music-auth-status :transient t)])
+   ("l" "Login"  youtube-music-login)
+   ("o" "Logout" youtube-music-logout)])
 
 ;;;; YouTube Music HTTP client
 
@@ -951,6 +1096,11 @@ Bump this when YouTube changes the wire protocol."
 (defconst youtube-music--api-origin "https://music.youtube.com"
   "Origin header value for API requests.")
 
+(defconst youtube-music--api-key "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
+  "Public API key for the WEB_REMIX client.
+This is a non-secret identifier shared with every browser visit
+to music.youtube.com; the server uses it to disambiguate clients.")
+
 (defun youtube-music--sapisid-hash (sapisid origin)
   "Build the `Authorization: SAPISIDHASH ...' value.
 SAPISID is the SAPISID cookie value; ORIGIN is the request origin."
@@ -966,13 +1116,15 @@ EXTRA-QUERY, if non-nil, is appended to the URL query string."
   (unless youtube-music--cookie
     (user-error "Not logged in; run `M-x youtube-music-login' first"))
   (let* ((url (concat youtube-music--api-base "/" endpoint
-                      "?prettyPrint=false"
+                      "?key=" youtube-music--api-key
+                      "&prettyPrint=false&alt=json"
                       (if extra-query (concat "&" extra-query) "")))
          (full-body
           (cons `(context . ((client . ((clientName . "WEB_REMIX")
                                          (clientVersion . ,youtube-music-client-version)
                                          (hl . "en")
-                                         (gl . "US")))))
+                                         (gl . "US")))
+                             (user . ,(make-hash-table))))
                 body))
          (json-body (json-encode full-body))
          (auth (youtube-music--sapisid-hash
@@ -992,8 +1144,9 @@ EXTRA-QUERY, if non-nil, is appended to the URL query string."
     (url-retrieve url
                   (lambda (status)
                     (condition-case nil
-                        (funcall callback
-                                 (youtube-music--read-response status))
+                        (let ((response (youtube-music--read-response status)))
+                          (youtube-music--observe-auth response)
+                          (funcall callback response))
                       (quit nil)))
                   nil t t)))
 
@@ -1134,7 +1287,11 @@ replacing the current playlist."
 ;;;; Library browse — parsers
 
 (defun youtube-music--browse-section-list (response)
-  "Walk RESPONSE down to its sectionListRenderer.contents vector, or nil."
+  "Walk RESPONSE down to its sectionListRenderer.contents vector, or nil.
+Tries multiple known shapes — `singleColumnBrowseResultsRenderer'
+\\(home, search\\), the older `twoColumnBrowseResultsRenderer.tabs[0]'
+\\(some browses\\), and the newer `secondaryContents' path under
+`twoColumnBrowseResultsRenderer' \\(library playlists, liked songs\\)."
   (or (youtube-music--get-in
        response [:contents :singleColumnBrowseResultsRenderer
                  :tabs 0 :tabRenderer :content
@@ -1142,7 +1299,10 @@ replacing the current playlist."
       (youtube-music--get-in
        response [:contents :twoColumnBrowseResultsRenderer
                  :tabs 0 :tabRenderer :content
-                 :sectionListRenderer :contents])))
+                 :sectionListRenderer :contents])
+      (youtube-music--get-in
+       response [:contents :twoColumnBrowseResultsRenderer
+                 :secondaryContents :sectionListRenderer :contents])))
 
 (defun youtube-music--parse-track-shelf (response)
   "Extract a list of track plists from a browse RESPONSE.
@@ -1292,15 +1452,25 @@ Falls back to URL-OR-PATH if neither yields anything useful."
                  ,(if first "replace" "append")))))
 
 (defun youtube-music--play-playlist-by-browse-id (browse-id)
-  "Fetch the playlist with BROWSE-ID (paginated) and play its tracks."
-  (message "youtube-music: loading playlist...")
-  (youtube-music--fetch-all-from-browse-id
-   browse-id
-   (lambda (tracks)
-     (cond
-      ((null tracks) (message "youtube-music: empty or unparseable playlist"))
-      (t (youtube-music--play-tracks tracks)
-         (message "youtube-music: queued %d tracks" (length tracks)))))))
+  "Play the playlist / mix / album referenced by BROWSE-ID.
+Browse IDs prefixed with \"VL\" are stripped to a playlist ID and
+handed to mpv as a \"playlist?list=...\" URL -- mpv's yt-dlp hook
+resolves the contents.  Other browse IDs (e.g. albums prefixed
+with \"MPREb_\") are fetched and parsed via the API."
+  (cond
+   ((string-prefix-p "VL" browse-id)
+    (youtube-music-play-url
+     (format "https://music.youtube.com/playlist?list=%s"
+             (substring browse-id 2))))
+   (t
+    (message "youtube-music: loading playlist...")
+    (youtube-music--fetch-all-from-browse-id
+     browse-id
+     (lambda (tracks)
+       (cond
+        ((null tracks) (message "youtube-music: empty or unparseable playlist"))
+        (t (youtube-music--play-tracks tracks)
+           (message "youtube-music: queued %d tracks" (length tracks)))))))))
 
 (defun youtube-music--populate-liked-set (tracks)
   "Replace `youtube-music--liked-set' with the videoIds from TRACKS."
@@ -1309,17 +1479,148 @@ Falls back to URL-OR-PATH if neither yields anything useful."
     (when-let ((vid (plist-get tr :video-id)))
       (puthash vid t youtube-music--liked-set))))
 
+(defun youtube-music--logged-in-flag (response)
+  "Return \"0\", \"1\", or nil for RESPONSE's GFEEDBACK.logged_in field."
+  (let ((sci (plist-get (plist-get response :responseContext)
+                        :serviceTrackingParams)))
+    (when (sequencep sci)
+      (cl-loop for entry across sci
+               when (equal (plist-get entry :service) "GFEEDBACK")
+               return (let ((params (plist-get entry :params)))
+                        (and (sequencep params)
+                             (cl-loop for p across params
+                                      when (equal (plist-get p :key)
+                                                  "logged_in")
+                                      return (plist-get p :value))))))))
+
+(defun youtube-music--observe-auth (response)
+  "Update `youtube-music--auth-state' from RESPONSE.
+On a transition into `logged-in' state, kick off a background
+account-info fetch so the buffer can display the user's name."
+  (let ((flag (youtube-music--logged-in-flag response)))
+    (when flag
+      (let* ((prev youtube-music--auth-state)
+             (new-state (if (equal flag "1") 'logged-in 'logged-out)))
+        (unless (eq prev new-state)
+          (setq youtube-music--auth-state new-state)
+          (when (and (eq new-state 'logged-in)
+                     (null youtube-music--account-name))
+            (youtube-music-fetch-account-info))
+          (when (eq new-state 'logged-out)
+            (setq youtube-music--account-name nil))
+          (youtube-music--rerender)))))
+  response)
+
+;;;###autoload
+(defun youtube-music-fetch-account-info ()
+  "Fetch the user's account display name in the background.
+Also conclusively flips `youtube-music--auth-state' based on
+whether an account header is returned: getting the name back
+proves we're authenticated; not getting it proves we aren't."
+  (interactive)
+  (youtube-music--youtubei-post
+   "account/account_menu" '()
+   (lambda (response)
+     (let ((name (or (youtube-music--get-in
+                      response
+                      [:actions 0 :openPopupAction :popup
+                       :multiPageMenuRenderer :header
+                       :activeAccountHeaderRenderer :accountName :runs 0 :text])
+                     (youtube-music--get-in
+                      response
+                      [:actions 0 :openPopupAction :popup
+                       :multiPageMenuRenderer :header
+                       :activeAccountHeaderRenderer :accountName :simpleText]))))
+       (cond
+        (name
+         (setq youtube-music--account-name name
+               youtube-music--auth-state 'logged-in)
+         (youtube-music--rerender))
+        (t
+         ;; Either the response had no name, or the request failed
+         ;; outright (HTTP error / parse error).  Either way, with
+         ;; credentials on disk this means they aren't being honoured.
+         (setq youtube-music--account-name nil
+               youtube-music--auth-state 'logged-out)
+         (youtube-music--rerender)))))))
+
+(defun youtube-music--sign-in-required-p (response)
+  "Return non-nil if RESPONSE was served as anonymous."
+  (equal (youtube-music--logged-in-flag response) "0"))
+
+(defun youtube-music--warn-stale-cookie ()
+  "Update auth state to logged-out (the buffer reflects the change)."
+  (setq youtube-music--auth-state 'logged-out)
+  (youtube-music--rerender))
+
 (defun youtube-music--fetch-all-from-browse-id (browse-id on-done)
   "Fetch every track from BROWSE-ID, following continuations.
-Calls ON-DONE with the full list once continuations are exhausted."
+Calls ON-DONE with the full list once continuations are exhausted.
+If the server returns a sign-in-required placeholder, warns the
+user and calls ON-DONE with the symbol `auth-failed' so the caller
+can suppress its own \"no results\" message."
   (let ((body `((browseId . ,browse-id))))
     (youtube-music--youtubei-post
      "browse" body
      (lambda (response)
-       (let ((tracks (youtube-music--parse-track-shelf response))
-             (token  (youtube-music--shelf-continuation-token response)))
-         (youtube-music--fetch-all-tracks
-          "browse" body token tracks on-done))))))
+       (cond
+        ((youtube-music--sign-in-required-p response)
+         (youtube-music--warn-stale-cookie)
+         (funcall on-done 'auth-failed))
+        (t
+         (let ((tracks (youtube-music--parse-track-shelf response))
+               (token  (youtube-music--shelf-continuation-token response)))
+           (youtube-music--fetch-all-tracks
+            "browse" body token tracks on-done))))))))
+
+;;;###autoload
+(defun youtube-music-debug-browse (browse-id)
+  "Fetch BROWSE-ID and dump the response shape to `*youtube-music-debug*'.
+Useful for diagnosing parser misses; share the output with the
+maintainer when reporting issues."
+  (interactive "sBrowse ID: ")
+  (youtube-music--youtubei-post
+   "browse"
+   `((browseId . ,browse-id))
+   (lambda (response)
+     (let ((buf (get-buffer-create "*youtube-music-debug*")))
+       (with-current-buffer buf
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (insert (format "=== Browse: %s ===\n\n" browse-id))
+           (insert "── top-level keys ──\n")
+           (when (consp response)
+             (cl-loop for (k _v) on response by #'cddr
+                      do (insert (format "  %S\n" k))))
+           (insert "\n── contents.* keys ──\n")
+           (let ((contents (plist-get response :contents)))
+             (cond
+              ((not (consp contents))
+               (insert (format "  (no contents; got %s)\n"
+                               (type-of contents))))
+              (t (cl-loop for (k _v) on contents by #'cddr
+                          do (insert (format "  %S\n" k)))
+                 (let ((tcbr (plist-get contents :twoColumnBrowseResultsRenderer)))
+                   (when (consp tcbr)
+                     (insert "\n── twoColumnBrowseResultsRenderer.* keys ──\n")
+                     (cl-loop for (k _v) on tcbr by #'cddr
+                              do (insert (format "  %S\n" k))))))))
+           (insert "\n── --browse-section-list returns ──\n")
+           (let ((sections (youtube-music--browse-section-list response)))
+             (insert (format "  type: %s, length: %s\n"
+                             (type-of sections)
+                             (if (sequencep sections)
+                                 (length sections) "n/a")))
+             (when (and sections (sequencep sections) (> (length sections) 0))
+               (cl-loop
+                for s across sections
+                for i from 0
+                do (insert (format "\n  Section %d keys:\n" i))
+                   (when (consp s)
+                     (cl-loop for (k _v) on s by #'cddr
+                              do (insert (format "    %S\n" k))))))))
+         (goto-char (point-min)))
+       (pop-to-buffer buf)))))
 
 ;;;###autoload
 (defun youtube-music-refresh-liked-set ()
@@ -1331,6 +1632,7 @@ This is what powers the thumbs-up indicator on tracks."
    "FEmusic_liked_videos"
    (lambda (tracks)
      (cond
+      ((eq tracks 'auth-failed) nil)
       ((null tracks) (message "youtube-music: no liked songs"))
       (t (youtube-music--populate-liked-set tracks)
          (youtube-music--rerender)
@@ -1346,6 +1648,7 @@ This is what powers the thumbs-up indicator on tracks."
    "FEmusic_liked_videos"
    (lambda (tracks)
      (cond
+      ((eq tracks 'auth-failed) nil)
       ((null tracks) (message "youtube-music: no liked songs"))
       (t (youtube-music--populate-liked-set tracks)
          (youtube-music--play-tracks tracks)
@@ -1360,20 +1663,148 @@ This is what powers the thumbs-up indicator on tracks."
    "browse"
    '((browseId . "FEmusic_liked_playlists"))
    (lambda (response)
-     (let ((entries (youtube-music--parse-playlist-shelf response)))
-       (cond
-        ((null entries) (message "youtube-music: no playlists found"))
-        (t (let* ((choice (completing-read "Playlist: " entries nil t))
-                  (browse-id (cdr (assoc choice entries))))
-             (when browse-id
-               (youtube-music--play-playlist-by-browse-id browse-id)))))))))
+     (cond
+      ((youtube-music--sign-in-required-p response)
+       (youtube-music--warn-stale-cookie))
+      (t
+       (let ((entries (youtube-music--parse-playlist-shelf response)))
+         (cond
+          ((null entries) (message "youtube-music: no playlists found"))
+          (t (let* ((choice (completing-read "Playlist: " entries nil t))
+                    (browse-id (cdr (assoc choice entries))))
+               (when browse-id
+                 (youtube-music--play-playlist-by-browse-id browse-id)))))))))))
 
 ;;;###autoload (autoload 'youtube-music-library "youtube-music" nil t)
 (transient-define-prefix youtube-music-library ()
   "Browse your YouTube Music library."
   ["Library"
-   ("l" "Liked songs"          youtube-music-liked)
-   ("p" "Playlists"            youtube-music-library-playlists)])
+   ("l" "Liked songs"            youtube-music-liked)
+   ("p" "Playlists"              youtube-music-library-playlists)
+   ("h" "Home / recommendations" youtube-music-home)])
+
+;;;; Home / recommendations browse
+
+(defun youtube-music--parse-home-item (item)
+  "Parse a home-shelf ITEM into a plist.
+Returns (:title :subtitle :kind :video-id :playlist-id :browse-id),
+where KIND is one of `song', `playlist', `browse', or nil if the
+shape is unfamiliar."
+  (cond
+   ((plist-get item :musicTwoRowItemRenderer)
+    (let* ((tri (plist-get item :musicTwoRowItemRenderer))
+           (title-runs (youtube-music--get-in tri [:title :runs]))
+           (sub-runs   (youtube-music--get-in tri [:subtitle :runs]))
+           (title (when (and title-runs (> (length title-runs) 0))
+                    (plist-get (aref title-runs 0) :text)))
+           (subtitle (when sub-runs
+                       (mapconcat (lambda (r) (or (plist-get r :text) ""))
+                                  sub-runs "")))
+           (vid (youtube-music--get-in
+                 tri [:navigationEndpoint :watchEndpoint :videoId]))
+           (pid (youtube-music--get-in
+                 tri [:navigationEndpoint :watchEndpoint :playlistId]))
+           (bid (youtube-music--get-in
+                 tri [:navigationEndpoint :browseEndpoint :browseId])))
+      (when title
+        (list :title title
+              :subtitle (or subtitle "")
+              :kind (cond (pid 'playlist)
+                          (vid 'song)
+                          (bid 'browse))
+              :video-id vid
+              :playlist-id pid
+              :browse-id bid))))
+   ((plist-get item :musicResponsiveListItemRenderer)
+    (when-let ((parsed (youtube-music--parse-list-item item)))
+      (list :title (plist-get parsed :title)
+            :subtitle (plist-get parsed :subtitle)
+            :kind 'song
+            :video-id (plist-get parsed :video-id))))))
+
+(defun youtube-music--shelf-title (shelf)
+  "Extract a human-readable title from a home SHELF renderer plist."
+  (or (youtube-music--get-in
+       shelf [:header :musicCarouselShelfBasicHeaderRenderer :title :runs 0 :text])
+      (youtube-music--get-in
+       shelf [:header :musicImmersiveCarouselShelfBasicHeaderRenderer
+               :title :runs 0 :text])
+      (youtube-music--get-in shelf [:title :runs 0 :text])
+      "Untitled"))
+
+(defun youtube-music--parse-home (response)
+  "Parse home RESPONSE into a list of (SHELF-TITLE . ITEMS) cons cells."
+  (let ((sections (youtube-music--browse-section-list response))
+        results)
+    (when sections
+      (cl-loop
+       for section across sections
+       for shelf = (or (plist-get section :musicCarouselShelfRenderer)
+                       (plist-get section :musicImmersiveCarouselShelfRenderer)
+                       (plist-get section :musicShelfRenderer))
+       when shelf
+       do (let* ((title (youtube-music--shelf-title shelf))
+                 (items (plist-get shelf :contents))
+                 (parsed (and items
+                              (cl-loop for it across items
+                                       for p = (youtube-music--parse-home-item it)
+                                       when p collect p))))
+            (when parsed (push (cons title parsed) results)))))
+    (nreverse results)))
+
+(defun youtube-music--play-home-item (item)
+  "Play a home ITEM plist (song, playlist/mix, or browseable list)."
+  (pcase (plist-get item :kind)
+    ('song
+     (youtube-music--remember-tracks (list item))
+     (youtube-music-play-url
+      (format "https://music.youtube.com/watch?v=%s"
+              (plist-get item :video-id))))
+    ('playlist
+     (let ((pid (plist-get item :playlist-id))
+           (vid (plist-get item :video-id)))
+       (youtube-music-play-url
+        (if vid
+            (format "https://music.youtube.com/watch?v=%s&list=%s" vid pid)
+          (format "https://music.youtube.com/playlist?list=%s" pid)))))
+    ('browse
+     (youtube-music--play-playlist-by-browse-id
+      (plist-get item :browse-id)))
+    (_ (user-error "Unsupported home-item kind"))))
+
+(defun youtube-music--prompt-home (shelves)
+  "Run the two-step pick UI on SHELVES (alist of TITLE → ITEMS)."
+  (let* ((shelf-title (completing-read "Shelf: " shelves nil t))
+         (items (cdr (assoc shelf-title shelves))))
+    (when items
+      (let* ((labels (mapcar (lambda (it)
+                               (cons (format "%s — %s"
+                                             (plist-get it :title)
+                                             (plist-get it :subtitle))
+                                     it))
+                             items))
+             (choice (completing-read (format "%s — pick: " shelf-title)
+                                      labels nil t))
+             (item (cdr (assoc choice labels))))
+        (when item (youtube-music--play-home-item item))))))
+
+;;;###autoload
+(defun youtube-music-home ()
+  "Browse YouTube Music home shelves (Discover / Replay / etc.).
+Pick a shelf, then pick an item to play."
+  (interactive)
+  (message "youtube-music: fetching home...")
+  (youtube-music--youtubei-post
+   "browse"
+   '((browseId . "FEmusic_home"))
+   (lambda (response)
+     (cond
+      ((youtube-music--sign-in-required-p response)
+       (youtube-music--warn-stale-cookie))
+      (t (let ((shelves (youtube-music--parse-home response)))
+           (if (null shelves)
+               (message "youtube-music: no home shelves")
+             (youtube-music--prompt-home shelves))))))))
 
 ;;;; Like / dislike the current track
 

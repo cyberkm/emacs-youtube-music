@@ -17,7 +17,7 @@ press `SPC` to pause; press `+` to like.
 - **Library** — pick from your liked songs or any of your saved
   playlists.
 - **Like / dislike** — works on the current track or whatever's
-  under your cursor in the queue. Hearts you change show up
+  under your cursor in the queue. The thumbs-up indicator updates
   immediately.
 - **Shuffle and repeat** — toggle shuffle, cycle through repeat
   modes (off → playlist → single track → off).
