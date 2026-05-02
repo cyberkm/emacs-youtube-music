@@ -233,6 +233,10 @@ Updated whenever a youtubei response arrives, by inspecting the
 (defvar youtube-music--account-name nil
   "Cached display name for the currently signed-in account, or nil.")
 
+(defvar youtube-music--auto-refresh-attempted nil
+  "Non-nil after we've tried silent cookie re-extraction this session.
+Reset on manual login / logout.")
+
 ;; Forward declaration: the defcustom lives in the Authentication
 ;; section further down, but the status renderer above needs the
 ;; symbol declared so byte-compile is happy.
@@ -664,6 +668,8 @@ Distinguishes three states:
                    (format " as %s" youtube-music--account-name)
                  "")
                "\n"))
+      ('refreshing
+       (insert "  ● refreshing cookie from your browser...\n"))
       ('logged-out
        (cond
         (have-creds
@@ -959,7 +965,8 @@ SOURCE is a label used in the success message."
   (youtube-music--credentials-save (list :cookie cookie))
   (setq youtube-music--cookie cookie
         youtube-music--sapisid (youtube-music--extract-sapisid cookie)
-        youtube-music--account-name nil)
+        youtube-music--account-name nil
+        youtube-music--auto-refresh-attempted nil)
   (youtube-music-fetch-account-info)
   (youtube-music--rerender)
   (message "youtube-music: logged in via %s" source))
@@ -1073,7 +1080,8 @@ Deletes `youtube-music-credentials-file' and clears in-memory cookie."
   (setq youtube-music--cookie nil
         youtube-music--sapisid nil
         youtube-music--auth-state 'logged-out
-        youtube-music--account-name nil)
+        youtube-music--account-name nil
+        youtube-music--auto-refresh-attempted nil)
   (youtube-music--rerender)
   (message "youtube-music: logged out"))
 
@@ -1568,7 +1576,37 @@ proves we're authenticated; not getting it proves we aren't."
          ;; credentials on disk this means they aren't being honoured.
          (setq youtube-music--account-name nil
                youtube-music--auth-state 'logged-out)
-         (youtube-music--rerender)))))))
+         (youtube-music--rerender)
+         (youtube-music--maybe-auto-refresh)))))))
+
+(defun youtube-music--maybe-auto-refresh ()
+  "Try silent cookie refresh from a browser when eligible.
+Eligible means: state is `logged-out', we still have stored
+credentials, we haven't tried this session, and yt-dlp is available.
+Updates the buffer status to `refreshing' before doing the work so
+the user knows something is happening."
+  (when (and (eq youtube-music--auth-state 'logged-out)
+             youtube-music--cookie
+             (not youtube-music--auto-refresh-attempted)
+             (executable-find "yt-dlp"))
+    (setq youtube-music--auto-refresh-attempted t
+          youtube-music--auth-state 'refreshing)
+    (youtube-music--rerender)
+    ;; Force redisplay so the user sees the status before the
+    ;; potentially-blocking yt-dlp probe runs.
+    (redisplay t)
+    (let ((new-cookie (cl-some #'youtube-music--extract-cookie-via-browser
+                               '("firefox" "chromium" "brave" "chrome"))))
+      (cond
+       ((and new-cookie (not (equal new-cookie youtube-music--cookie)))
+        (youtube-music--credentials-save (list :cookie new-cookie))
+        (setq youtube-music--cookie new-cookie
+              youtube-music--sapisid (youtube-music--extract-sapisid new-cookie)
+              youtube-music--account-name nil)
+        (youtube-music-fetch-account-info))
+       (t
+        (setq youtube-music--auth-state 'logged-out)
+        (youtube-music--rerender))))))
 
 (defun youtube-music--sign-in-required-p (response)
   "Return non-nil if RESPONSE was served as anonymous."
