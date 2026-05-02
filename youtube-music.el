@@ -202,6 +202,7 @@ Recognised tokens:
   "Non-nil when we have shuffled the current mpv playlist.
 Tracked locally because mpv has no runtime `shuffled' property.")
 
+
 (defvar youtube-music--mode-line-string ""
   "Pre-formatted mode-line indicator, recomputed on state change.")
 
@@ -491,7 +492,8 @@ EVENT is the `process-status' string supplied by Emacs."
   "+"   #'youtube-music-like
   "-"   #'youtube-music-dislike
   "z"   #'youtube-music-toggle-shuffle
-  "r"   #'youtube-music-cycle-repeat)
+  "r"   #'youtube-music-cycle-repeat
+  "R"   #'youtube-music-radio)
 
 (define-derived-mode youtube-music-mode special-mode "YT-Music"
   "Major mode for the YouTube Music status buffer.
@@ -724,16 +726,29 @@ On the Now Playing line, stop playback instead."
   (interactive "sYouTube URL: ")
   (youtube-music--send `("loadfile" ,url "append-play")))
 
+(defun youtube-music--no-track-p ()
+  "Return non-nil when there is no track loaded in mpv."
+  (and (null (plist-get youtube-music--state :title))
+       (null (plist-get youtube-music--state :path))))
+
+(defun youtube-music--require-track ()
+  "Signal a `user-error' if no track is loaded."
+  (when (youtube-music--no-track-p)
+    (user-error
+     "No track loaded — run `M-x youtube-music' and search or pick from your library to start something")))
+
 ;;;###autoload
 (defun youtube-music-play-pause ()
   "Toggle play / pause."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send '("cycle" "pause")))
 
 ;;;###autoload
 (defun youtube-music-play ()
   "Resume playback (un-pause)."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send '("set" "pause" "no")))
 
 ;;;###autoload
@@ -741,6 +756,7 @@ On the Now Playing line, stop playback instead."
   "Stop playback by pausing and resetting position to the start.
 Leaves the current playlist intact."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send '("seek" 0 "absolute"))
   (youtube-music--send '("set" "pause" "yes")))
 
@@ -750,6 +766,7 @@ Leaves the current playlist intact."
 Uses mpv's `playlist-shuffle' / `playlist-unshuffle' commands so
 that subsequent `youtube-music-next' calls follow the new order."
   (interactive)
+  (youtube-music--require-track)
   (cond
    (youtube-music--shuffled-p
     (youtube-music--send '("playlist-unshuffle"))
@@ -765,6 +782,7 @@ that subsequent `youtube-music-next' calls follow the new order."
 (defun youtube-music-cycle-repeat ()
   "Cycle repeat mode: off → repeat-playlist → repeat-track → off."
   (interactive)
+  (youtube-music--require-track)
   (let* ((file (plist-get youtube-music--state :loop-file))
          (pl   (plist-get youtube-music--state :loop-playlist))
          (mode (cond
@@ -790,34 +808,39 @@ that subsequent `youtube-music-next' calls follow the new order."
   (let* ((file (plist-get youtube-music--state :loop-file))
          (pl   (plist-get youtube-music--state :loop-playlist))
          badges)
-    (when youtube-music--shuffled-p (push "🔀" badges))
+    (when youtube-music--shuffled-p
+      (push (youtube-music--glyph 'shuffle) badges))
     (cond
-     ((equal file "inf") (push "🔂" badges))
-     ((equal pl   "inf") (push "🔁" badges)))
+     ((equal file "inf") (push (youtube-music--glyph 'repeat-one) badges))
+     ((equal pl   "inf") (push (youtube-music--glyph 'repeat-all) badges)))
     (if badges (concat "  " (string-join (nreverse badges) " ")) "")))
 
 ;;;###autoload
 (defun youtube-music-next ()
   "Skip to the next track in the playlist."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send '("playlist-next" "weak")))
 
 ;;;###autoload
 (defun youtube-music-prev ()
   "Skip to the previous track in the playlist."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send '("playlist-prev" "weak")))
 
 ;;;###autoload
 (defun youtube-music-seek-forward ()
   "Seek forward by `youtube-music-seek-step' seconds."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send `("seek" ,youtube-music-seek-step "relative")))
 
 ;;;###autoload
 (defun youtube-music-seek-backward ()
   "Seek backward by `youtube-music-seek-step' seconds."
   (interactive)
+  (youtube-music--require-track)
   (youtube-music--send `("seek" ,(- youtube-music-seek-step) "relative")))
 
 ;;;###autoload
@@ -1408,10 +1431,13 @@ the final list."
 ;;;; Library browse — commands
 
 (defun youtube-music--video-id-from-url (url)
-  "Return the videoId from a YouTube/YT-Music watch URL, or nil."
-  (when (and (stringp url)
-             (string-match "[?&]v=\\([A-Za-z0-9_-]+\\)" url))
-    (match-string 1 url)))
+  "Return the videoId from a YouTube/YT-Music URL, or nil.
+Handles `watch?v=<id>', `/shorts/<id>', and `youtu.be/<id>' shapes."
+  (when (stringp url)
+    (cond
+     ((string-match "[?&]v=\\([A-Za-z0-9_-]+\\)" url) (match-string 1 url))
+     ((string-match "/shorts/\\([A-Za-z0-9_-]+\\)" url) (match-string 1 url))
+     ((string-match "youtu\\.be/\\([A-Za-z0-9_-]+\\)" url) (match-string 1 url)))))
 
 (defun youtube-music--remember-tracks (tracks)
   "Cache title/subtitle metadata for TRACKS keyed by videoId."
@@ -1819,6 +1845,16 @@ Pick a shelf, then pick an item to play."
                (filename (and entry (plist-get entry :filename))))
           (and filename (youtube-music--video-id-from-url filename))))))
 
+(defun youtube-music--complain-no-vid (verb)
+  "Signal an informative `user-error' for VERB when no videoId is resolvable.
+Surfaces the relevant state so we can diagnose what was missing."
+  (user-error
+   "Cannot %s: no track at point, and no playing track found (path=%S, playlist-pos=%S, queue-len=%d)"
+   verb
+   (plist-get youtube-music--state :path)
+   (plist-get youtube-music--state :playlist-pos)
+   (length (or youtube-music--playlist-cache '()))))
+
 (defun youtube-music--video-id-at-point-or-current ()
   "Return the videoId DWIM at point, or for the currently playing track.
 If point is on a queue entry, return that entry's videoId.
@@ -1856,7 +1892,7 @@ NEW-STATE is one of `like', `dislike', `none'.  The target is the
 track at point in the queue, or the currently playing track."
   (let ((vid (youtube-music--video-id-at-point-or-current)))
     (cond
-     ((null vid) (user-error "No track at point and nothing playing"))
+     ((null vid) (youtube-music--complain-no-vid verb))
      (t
       (youtube-music--youtubei-post
        endpoint
@@ -1886,20 +1922,108 @@ track at point in the queue, or the currently playing track."
   (interactive)
   (youtube-music--rate-track "like/removelike" "unrate" 'none))
 
+(defconst youtube-music--glyph-table
+  '((thumbs-up   . ("👍" . "+"))
+    (thumbs-down . ("👎" . "-"))
+    (shuffle     . ("🔀" . "↯"))
+    (repeat-all  . ("🔁" . "↻"))
+    (repeat-one  . ("🔂" . "↺")))
+  "Glyph fallback table: (KEY . (EMOJI . FALLBACK)).
+The emoji is preferred; the BMP/ASCII fallback is used when the
+emoji cannot be displayed in the current fontset.")
+
+(defun youtube-music--glyph (key)
+  "Return the best displayable glyph for KEY in `youtube-music--glyph-table'."
+  (let* ((pair (cdr (assq key youtube-music--glyph-table)))
+         (emoji (car pair))
+         (fallback (cdr pair)))
+    (if (and emoji (char-displayable-p (aref emoji 0)))
+        emoji
+      fallback)))
+
 (defun youtube-music--rating-glyph-for (vid)
   "Return a propertized thumbs-up/down glyph for VID, or nil."
   (cond
    ((null vid) nil)
    ((and youtube-music--liked-set
          (gethash vid youtube-music--liked-set))
-    (propertize "👍" 'face 'youtube-music-thumbs-up))
+    (propertize (youtube-music--glyph 'thumbs-up)
+                'face 'youtube-music-thumbs-up))
    ((gethash vid youtube-music--disliked-set)
-    (propertize "👎" 'face 'youtube-music-thumbs-down))
+    (propertize (youtube-music--glyph 'thumbs-down)
+                'face 'youtube-music-thumbs-down))
    (t nil)))
 
 (defun youtube-music--current-rating-glyph ()
   "Return the rating glyph for the currently-playing track, or nil."
   (youtube-music--rating-glyph-for (youtube-music--current-video-id)))
+
+;;;; Radio (find-similar)
+
+(defun youtube-music--parse-radio-tracks (response)
+  "Parse a `youtubei/v1/next' RESPONSE into a list of track plists."
+  (let ((items (youtube-music--get-in
+                response
+                [:contents :singleColumnMusicWatchNextResultsRenderer
+                 :tabbedRenderer :watchNextTabbedResultsRenderer
+                 :tabs 0 :tabRenderer :content
+                 :musicQueueRenderer :content
+                 :playlistPanelRenderer :contents]))
+        results)
+    (when items
+      (cl-loop
+       for entry across items
+       for r = (or (plist-get entry :playlistPanelVideoRenderer)
+                   (youtube-music--get-in
+                    entry [:playlistPanelVideoWrapperRenderer
+                           :primaryRenderer :playlistPanelVideoRenderer]))
+       when r
+       do (let* ((title (youtube-music--get-in r [:title :runs 0 :text]))
+                 (vid   (plist-get r :videoId))
+                 (runs  (youtube-music--get-in r [:longBylineText :runs]))
+                 (sub   (when (sequencep runs)
+                          (mapconcat (lambda (run)
+                                       (or (plist-get run :text) ""))
+                                     runs ""))))
+            (when (and title vid)
+              (push (list :title title :subtitle (or sub "")
+                          :video-id vid)
+                    results)))))
+    (nreverse results)))
+
+;;;###autoload
+(defun youtube-music-radio (&optional enqueue)
+  "Start a radio of songs similar to the track at point or now playing.
+With a prefix argument, ENQUEUE the radio at the end of the
+current queue instead of replacing it."
+  (interactive "P")
+  (let ((vid (youtube-music--video-id-at-point-or-current)))
+    (cond
+     ((null vid) (youtube-music--complain-no-vid "start radio"))
+     (t
+      (message "youtube-music: starting radio...")
+      (youtube-music--youtubei-post
+       "next"
+       `((videoId . ,vid) (playlistId . ,(format "RDAMVM%s" vid)))
+       (lambda (response)
+         (let ((tracks (youtube-music--parse-radio-tracks response)))
+           (cond
+            ((null tracks)
+             (message "youtube-music: no radio tracks returned"))
+            (t
+             (youtube-music--remember-tracks tracks)
+             (cond
+              (enqueue
+               (cl-loop for tr in tracks
+                        do (youtube-music--send
+                            `("loadfile"
+                              ,(format "https://music.youtube.com/watch?v=%s"
+                                       (plist-get tr :video-id))
+                              "append-play"))))
+              (t (youtube-music--play-tracks tracks)))
+             (message "youtube-music: radio %s (%d tracks)"
+                      (if enqueue "appended" "queued")
+                      (length tracks)))))))))))
 
 ;;;; Status-buffer transient menu
 
@@ -1947,7 +2071,8 @@ This transient is invoked from the status buffer via `?' or `h'."
     ("-"   "Dislike"        youtube-music-dislike       :transient t)
     ("="   "Unrate"         youtube-music-unrate        :transient t)]
    [("z"   "Shuffle"        youtube-music-toggle-shuffle :transient t)
-    ("r"   "Repeat (cycle)" youtube-music-cycle-repeat   :transient t)]]
+    ("r"   "Repeat (cycle)" youtube-music-cycle-repeat   :transient t)
+    ("R"   "Radio (similar)" youtube-music-radio)]]
   ["Buffer"
    :if-derived youtube-music-mode
    [("g"        "       Refresh"                youtube-music-refresh)
