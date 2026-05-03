@@ -1128,9 +1128,11 @@ Bump this when YouTube changes the wire protocol."
   "Origin header value for API requests.")
 
 (defconst youtube-music--api-key "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30"
-  "Public API key for the WEB_REMIX client.
-This is a non-secret identifier shared with every browser visit
-to music.youtube.com; the server uses it to disambiguate clients.")
+  "Public API key identifying us as the WEB_REMIX (YT Music web) client.
+Not a personal credential -- it's the same fixed value every
+browser session at music.youtube.com sends, used by the server
+to identify the client *application*, not the user.  Auth is
+done separately via the SAPISIDHASH header.")
 
 (defun youtube-music--sapisid-hash (sapisid origin)
   "Build the `Authorization: SAPISIDHASH ...' value.
@@ -1319,21 +1321,22 @@ replacing the current playlist."
 
 (defun youtube-music--browse-section-list (response)
   "Walk RESPONSE down to its sectionListRenderer.contents vector, or nil.
-Tries multiple known shapes — `singleColumnBrowseResultsRenderer'
-\\(home, search\\), the older `twoColumnBrowseResultsRenderer.tabs[0]'
-\\(some browses\\), and the newer `secondaryContents' path under
-`twoColumnBrowseResultsRenderer' \\(library playlists, liked songs\\)."
+Tries multiple known shapes:
+  `singleColumnBrowseResultsRenderer.tabs[0]' (home, search),
+  `twoColumnBrowseResultsRenderer.secondaryContents' (album / mix /
+  library tracks; the tabs side here is the header, NOT the list),
+  `twoColumnBrowseResultsRenderer.tabs[0]' as a final fallback."
   (or (youtube-music--get-in
        response [:contents :singleColumnBrowseResultsRenderer
                  :tabs 0 :tabRenderer :content
                  :sectionListRenderer :contents])
       (youtube-music--get-in
        response [:contents :twoColumnBrowseResultsRenderer
-                 :tabs 0 :tabRenderer :content
-                 :sectionListRenderer :contents])
+                 :secondaryContents :sectionListRenderer :contents])
       (youtube-music--get-in
        response [:contents :twoColumnBrowseResultsRenderer
-                 :secondaryContents :sectionListRenderer :contents])))
+                 :tabs 0 :tabRenderer :content
+                 :sectionListRenderer :contents])))
 
 (defun youtube-music--parse-track-shelf (response)
   "Extract a list of track plists from a browse RESPONSE.
@@ -1487,24 +1490,17 @@ Falls back to URL-OR-PATH if neither yields anything useful."
 
 (defun youtube-music--play-playlist-by-browse-id (browse-id)
   "Play the playlist / mix / album referenced by BROWSE-ID.
-Browse IDs prefixed with \"VL\" are stripped to a playlist ID and
-handed to mpv as a \"playlist?list=...\" URL -- mpv's yt-dlp hook
-resolves the contents.  Other browse IDs (e.g. albums prefixed
-with \"MPREb_\") are fetched and parsed via the API."
-  (cond
-   ((string-prefix-p "VL" browse-id)
-    (youtube-music-play-url
-     (format "https://music.youtube.com/playlist?list=%s"
-             (substring browse-id 2))))
-   (t
-    (message "youtube-music: loading playlist...")
-    (youtube-music--fetch-all-from-browse-id
-     browse-id
-     (lambda (tracks)
-       (cond
-        ((null tracks) (message "youtube-music: empty or unparseable playlist"))
-        (t (youtube-music--play-tracks tracks)
-           (message "youtube-music: queued %d tracks" (length tracks)))))))))
+Always fetches via the API and queues the resolved tracks
+individually -- handing playlist URLs (especially `?list=LM' for
+Liked Music) to yt-dlp doesn't reliably expand them."
+  (message "youtube-music: loading playlist...")
+  (youtube-music--fetch-all-from-browse-id
+   browse-id
+   (lambda (tracks)
+     (cond
+      ((null tracks) (message "youtube-music: empty or unparseable playlist"))
+      (t (youtube-music--play-tracks tracks)
+         (message "youtube-music: queued %d tracks" (length tracks)))))))
 
 (defun youtube-music--populate-liked-set (tracks)
   "Replace `youtube-music--liked-set' with the videoIds from TRACKS."
@@ -1826,11 +1822,17 @@ shape is unfamiliar."
               (plist-get item :video-id))))
     ('playlist
      (let ((pid (plist-get item :playlist-id))
-           (vid (plist-get item :video-id)))
-       (youtube-music-play-url
-        (if vid
-            (format "https://music.youtube.com/watch?v=%s&list=%s" vid pid)
-          (format "https://music.youtube.com/playlist?list=%s" pid)))))
+           (vid (plist-get item :video-id))
+           (bid (plist-get item :browse-id)))
+       (cond
+        ;; "Liked Music" — yt-dlp can't expand `?list=LM'; route through
+        ;; the API path that knows about the FEmusic_liked_videos browse.
+        ((or (equal pid "LM") (equal bid "VLLM"))
+         (youtube-music-liked))
+        (t (youtube-music-play-url
+            (if vid
+                (format "https://music.youtube.com/watch?v=%s&list=%s" vid pid)
+              (format "https://music.youtube.com/playlist?list=%s" pid)))))))
     ('browse
      (youtube-music--play-playlist-by-browse-id
       (plist-get item :browse-id)))
