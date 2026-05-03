@@ -1525,19 +1525,25 @@ Liked Music) to yt-dlp doesn't reliably expand them."
 
 (defun youtube-music--observe-auth (response)
   "Update `youtube-music--auth-state' from RESPONSE.
-On a transition into `logged-in' state, kick off a background
-account-info fetch so the buffer can display the user's name."
+On a transition into `logged-in', clear the auto-refresh one-shot
+and kick off a background account-info fetch so the buffer shows
+the user's name.  On a transition into `logged-out', try a silent
+auto-refresh from the browser before settling on that state."
   (let ((flag (youtube-music--logged-in-flag response)))
     (when flag
       (let* ((prev youtube-music--auth-state)
              (new-state (if (equal flag "1") 'logged-in 'logged-out)))
         (unless (eq prev new-state)
           (setq youtube-music--auth-state new-state)
-          (when (and (eq new-state 'logged-in)
-                     (null youtube-music--account-name))
-            (youtube-music-fetch-account-info))
-          (when (eq new-state 'logged-out)
-            (setq youtube-music--account-name nil))
+          (cond
+           ((eq new-state 'logged-in)
+            (setq youtube-music--auto-refresh-attempted nil)
+            (when (null youtube-music--account-name)
+              (youtube-music-fetch-account-info)))
+           ((eq new-state 'logged-out)
+            (setq youtube-music--account-name nil)
+            (youtube-music--rerender)
+            (youtube-music--maybe-auto-refresh)))
           (youtube-music--rerender)))))
   response)
 
