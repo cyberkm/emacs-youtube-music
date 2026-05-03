@@ -3,6 +3,7 @@
 ;; Copyright (C) 2026 Pavel Bibergal
 
 ;; Author: Pavel Bibergal <pavel@keewano.com>
+;; Assisted-by: Claude:claude-opus-4-7
 ;; URL: https://github.com/cyberkm/emacs-youtube-music
 ;; Version: 0.1.0
 ;; Package-Requires: ((emacs "29.1"))
@@ -130,15 +131,15 @@ Recognised tokens:
 ;;;; Faces
 
 (defface youtube-music-section-heading
-  '((t :inherit font-lock-keyword-face :weight bold))
+  '((t :inherit font-lock-keyword-face))
   "Face for section headings in the status buffer.")
 
 (defface youtube-music-current-track
-  '((t :inherit font-lock-string-face :weight bold))
+  '((t :inherit font-lock-string-face))
   "Face for the now-playing track title.")
 
 (defface youtube-music-queue-current
-  '((t :inherit font-lock-string-face :weight bold))
+  '((t :inherit font-lock-string-face))
   "Face for the currently-playing entry inside the Queue section.")
 
 (defface youtube-music-queue-past
@@ -146,7 +147,7 @@ Recognised tokens:
   "Face for already-played entries inside the Queue section.")
 
 (defface youtube-music-thumbs-up
-  '((t :inherit success :weight bold))
+  '((t :inherit success))
   "Face for the thumbs-up indicator on a track.")
 
 (defface youtube-music-thumbs-down
@@ -158,7 +159,7 @@ Recognised tokens:
   "Face for the signed-in status indicator.")
 
 (defface youtube-music-auth-error
-  '((t :inherit error :weight bold))
+  '((t :inherit error))
   "Face for the signed-out status indicator.")
 
 (defface youtube-music-progress-fill
