@@ -1093,18 +1093,11 @@ Deletes `youtube-music-credentials-file' and clears in-memory cookie."
   (message "youtube-music: %s"
            (if (youtube-music--logged-in-p) "logged in" "logged out")))
 
-(defun youtube-music--auth-header ()
-  "Return the dynamic header for `youtube-music-auth'."
-  (propertize
-   (if (youtube-music--logged-in-p)
-       "youtube-music auth — logged in"
-     "youtube-music auth — logged out")
-   'face 'transient-heading))
-
 ;;;###autoload (autoload 'youtube-music-auth "youtube-music" nil t)
 (transient-define-prefix youtube-music-auth ()
-  "Manage YouTube Music authentication."
-  :description #'youtube-music--auth-header
+  "Manage YouTube Music authentication.
+The current sign-in state is shown in the Status section of the
+`*youtube-music*' buffer."
   ["Authentication"
    ("l" "Login"  youtube-music-login)
    ("o" "Logout" youtube-music-logout)])
@@ -2074,30 +2067,13 @@ current queue instead of replacing it."
 
 ;;;; Status-buffer transient menu
 
-(defun youtube-music--dispatch-header ()
-  "Return the dynamic header for `youtube-music-dispatch'."
-  (let ((title (plist-get youtube-music--state :title))
-        (path  (plist-get youtube-music--state :path))
-        (pause (plist-get youtube-music--state :pause))
-        (pos   (plist-get youtube-music--state :time-pos))
-        (dur   (plist-get youtube-music--state :duration)))
-    (propertize
-     (cond
-      ((or title path)
-       (format "%s %s   %s / %s"
-               (if pause "⏸" "▶")
-               (youtube-music--display-title-for path title)
-               (youtube-music--format-time pos)
-               (youtube-music--format-time dur)))
-      (t "youtube-music — nothing playing"))
-     'face 'transient-heading)))
-
 ;; No autoload; the only entry point is `?' / `h' inside
 ;; `youtube-music-mode'.
 (transient-define-prefix youtube-music-dispatch ()
   "Show available YouTube Music commands.
-This transient is invoked from the status buffer via `?' or `h'."
-  :description #'youtube-music--dispatch-header
+This transient is invoked from the status buffer via `?' or `h'.
+The currently-playing track is shown in the Now Playing section
+of the buffer rather than in the menu header."
   ["Browse"
    [("s" "Search (enqueue)" youtube-music-search-enqueue)
     ("S" "Search (replace)" youtube-music-search)
