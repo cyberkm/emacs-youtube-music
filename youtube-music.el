@@ -485,6 +485,7 @@ EVENT is the `process-status' string supplied by Emacs."
   "b"   #'youtube-music-seek-backward
   "g"   #'youtube-music-refresh
   "q"   #'quit-window
+  "Q"   #'youtube-music-quit
   "RET" #'youtube-music-play-at-point
   "k"   #'youtube-music-remove-at-point
   "u"   #'youtube-music-play-url
@@ -694,7 +695,7 @@ Distinguishes three states:
 (defun youtube-music--render-help ()
   "Render the in-buffer help line."
   (insert (propertize
-           "  ? menu   SPC pause  n next  p prev  x stop  f/b seek    g refresh  q bury\n"
+           "  ? menu   SPC pause  n next  p prev  x stop  f/b seek    g refresh  q bury  Q quit\n"
            'face 'youtube-music-help)))
 
 ;;;; Commands acting on the status buffer
@@ -860,10 +861,16 @@ that subsequent `youtube-music-next' calls follow the new order."
 
 ;;;###autoload
 (defun youtube-music-quit ()
-  "Stop playback, kill mpv, and clear the mode line."
+  "Quit the player and clear the mode line.
+After this, system-level media controllers (`playerctl', waybar
+mpris module, etc.) stop seeing a YouTube Music player.  Use
+`youtube-music' (or `C-c y') to start it again."
   (interactive)
-  (when (youtube-music--ipc-connected-p) (delete-process youtube-music--ipc-process))
-  (when (youtube-music--mpv-running-p)   (delete-process youtube-music--mpv-process))
+  (when (youtube-music--ipc-connected-p)
+    (ignore-errors (youtube-music--send '("quit")))
+    (delete-process youtube-music--ipc-process))
+  (when (youtube-music--mpv-running-p)
+    (delete-process youtube-music--mpv-process))
   (setq youtube-music--ipc-process nil
         youtube-music--mpv-process nil
         youtube-music--mode-line-string ""
@@ -2082,7 +2089,7 @@ of the buffer rather than in the menu header."
     ("e" "Enqueue URL"      youtube-music-enqueue-url)]
    [("a" "Auth"             youtube-music-auth)
     ("L" "Show mpv log"     youtube-music-show-log)
-    ("Q" "Quit (kill mpv)"  youtube-music-quit)]]
+    ("Q" "Quit player"      youtube-music-quit)]]
   ["Playback"
    [("SPC" "Play / pause"   youtube-music-play-pause   :transient t)
     ("n"   "Next track"     youtube-music-next         :transient t)
