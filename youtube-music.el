@@ -881,7 +881,8 @@ mpris module, etc.) stop seeing a YouTube Music player.  Use
   (setq youtube-music--liked-set nil)
   (clrhash youtube-music--disliked-set)
   (force-mode-line-update t)
-  (youtube-music--rerender))
+  (when-let ((win (get-buffer-window youtube-music-buffer-name t)))
+    (quit-window nil win)))
 
 ;;;; Authentication
 
