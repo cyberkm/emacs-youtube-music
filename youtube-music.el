@@ -433,7 +433,15 @@ EVENT is the `process-status' string supplied by Emacs."
                                                    (member data '("inf" "yes"))))
                                           "inf" "no")))))
   (youtube-music--refresh-modeline)
-  (youtube-music--rerender))
+  ;; Time/pause ticks affect only the Now Playing block.  Updating just
+  ;; that region (instead of erasing and rebuilding the whole buffer
+  ;; every second) keeps transient overlays elsewhere — avy hints,
+  ;; isearch highlights — alive between ticks.
+  (pcase name
+    ((or "time-pos" "duration" "pause" "media-title"
+         "loop-file" "loop-playlist")
+     (youtube-music--update-now-playing))
+    (_ (youtube-music--rerender))))
 
 ;;;; Mode line
 
@@ -587,20 +595,22 @@ EVENT is the `process-status' string supplied by Emacs."
               (propertize (make-string (max 0 (- width filled)) ?░)
                           'face 'youtube-music-progress-empty)))))
 
-(defun youtube-music--render-now-playing ()
-  "Render the Now Playing section."
-  (youtube-music--insert-heading "── Now Playing ──")
+(defun youtube-music--insert-now-playing-body ()
+  "Insert the title/progress lines of the Now Playing section.
+The inserted region is tagged with `youtube-music-now-playing' so
+that `youtube-music--update-now-playing' can find it later and
+refresh it in place without disturbing the rest of the buffer."
   (let* ((mpv-title (plist-get youtube-music--state :title))
          (path  (plist-get youtube-music--state :path))
          (pause (plist-get youtube-music--state :pause))
          (pos   (plist-get youtube-music--state :time-pos))
          (dur   (plist-get youtube-music--state :duration))
          (title (and (or mpv-title path)
-                     (youtube-music--display-title-for path mpv-title))))
+                     (youtube-music--display-title-for path mpv-title)))
+         (start (point)))
     (if (null title)
         (insert "  (nothing playing)\n")
-      (let ((start (point))
-            (glyph (youtube-music--current-rating-glyph))
+      (let ((glyph (youtube-music--current-rating-glyph))
             (badges (youtube-music--mode-badges)))
         (insert "  " (if pause "⏸" "▶") " "
                 (propertize title 'face 'youtube-music-current-track)
@@ -611,9 +621,33 @@ EVENT is the `process-status' string supplied by Emacs."
                         (youtube-music--render-progress
                          pos dur youtube-music-progress-bar-width)
                         (youtube-music--format-time pos)
-                        (youtube-music--format-time dur)))
-        (put-text-property start (point) 'youtube-music-now-playing t))))
+                        (youtube-music--format-time dur)))))
+    (put-text-property start (point) 'youtube-music-now-playing t)))
+
+(defun youtube-music--render-now-playing ()
+  "Render the Now Playing section."
+  (youtube-music--insert-heading "── Now Playing ──")
+  (youtube-music--insert-now-playing-body)
   (insert "\n"))
+
+(defun youtube-music--update-now-playing ()
+  "Refresh only the Now Playing block in place.
+Falls back to a full rerender if the tagged region is missing
+(e.g. before the first paint)."
+  (if-let* ((buf (get-buffer youtube-music-buffer-name)))
+      (with-current-buffer buf
+        (let ((beg (text-property-any (point-min) (point-max)
+                                      'youtube-music-now-playing t)))
+          (if (null beg)
+              (youtube-music--rerender)
+            (let* ((inhibit-read-only t)
+                   (end (or (text-property-not-all
+                             beg (point-max) 'youtube-music-now-playing t)
+                            (point-max))))
+              (save-excursion
+                (delete-region beg end)
+                (goto-char beg)
+                (youtube-music--insert-now-playing-body))))))))
 
 (defun youtube-music--render-queue ()
   "Render the queue section.
