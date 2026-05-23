@@ -98,13 +98,19 @@ it with `youtube-music-show-log'."
 (defcustom youtube-music-mpv-mpris-search-paths
   '("/usr/lib64/mpv/scripts/mpris.so"
     "/usr/lib/mpv/scripts/mpris.so"
+    "/usr/lib/*-linux-gnu/mpv/scripts/mpris.so"
     "/usr/lib/mpv-mpris/mpris.so"
     "/usr/local/lib/mpv/scripts/mpris.so")
   "Candidate paths searched for the mpv-mpris plugin.
-When the first existing path is non-nil it is loaded via mpv's
+Entries are treated as glob patterns (see `file-expand-wildcards')
+so the Debian/Ubuntu multiarch directory can be covered with a
+single wildcard.  The first matching file is loaded via mpv's
 `--script' flag, exposing playback state on the MPRIS D-Bus
-interface (`playerctl', the waybar mpris module, etc.).  Set to
-nil to opt out."
+interface (`playerctl', the waybar mpris module, etc.).
+
+MPRIS is a Linux-only protocol; on macOS no entry will match and
+mpv runs without the plugin, which is fine.  Set to nil to opt
+out explicitly."
   :type '(repeat file))
 
 (defcustom youtube-music-modeline-format " %P♪ %t"
@@ -280,8 +286,13 @@ mode-line indicator."
     (youtube-music--rerender)))
 
 (defun youtube-music--mpris-script-path ()
-  "Return the first existing path in `youtube-music-mpv-mpris-search-paths'."
-  (cl-find-if #'file-exists-p youtube-music-mpv-mpris-search-paths))
+  "Return the first existing match for `youtube-music-mpv-mpris-search-paths'.
+Each entry is passed through `file-expand-wildcards' so that
+distro-specific directories (notably Debian/Ubuntu's multiarch
+`/usr/lib/<arch>-linux-gnu/...') can be covered by a glob."
+  (cl-loop for pattern in youtube-music-mpv-mpris-search-paths
+           for hits = (file-expand-wildcards pattern)
+           when hits return (car hits)))
 
 (defun youtube-music--start-mpv ()
   "Spawn the mpv subprocess and wait for the IPC socket to appear."
@@ -1014,6 +1025,13 @@ SOURCE is a label used in the success message."
   (youtube-music--rerender)
   (message "youtube-music: logged in via %s" source))
 
+(defconst youtube-music--cookie-source-browsers
+  '("firefox" "chromium" "brave" "chrome" "edge" "safari")
+  "Browsers probed for a YouTube cookie via `yt-dlp --cookies-from-browser'.
+The order is the probe order; the first browser yielding a usable
+cookie wins.  yt-dlp also supports `opera', `vivaldi', and
+`whale' — add them locally if you need them.")
+
 ;;;###autoload
 (defun youtube-music-login ()
   "Log in to YouTube Music.
@@ -1021,10 +1039,9 @@ Probes every browser yt-dlp can read.  If exactly one yields a
 usable cookie, uses it.  If several do, prompts you to pick.  If
 none, falls back to the manual paste flow."
   (interactive)
-  (let* ((browsers '("firefox" "chromium" "brave" "chrome"))
-         (hits (and (executable-find "yt-dlp")
+  (let* ((hits (and (executable-find "yt-dlp")
                     (progn (message "youtube-music: probing browsers...")
-                           (cl-loop for b in browsers
+                           (cl-loop for b in youtube-music--cookie-source-browsers
                                     for c = (youtube-music--extract-cookie-via-browser b)
                                     when c collect (cons b c))))))
     (pcase (length hits)
@@ -1634,7 +1651,7 @@ the user knows something is happening."
     ;; potentially-blocking yt-dlp probe runs.
     (redisplay t)
     (let ((new-cookie (cl-some #'youtube-music--extract-cookie-via-browser
-                               '("firefox" "chromium" "brave" "chrome"))))
+                               youtube-music--cookie-source-browsers)))
       (cond
        ((and new-cookie (not (equal new-cookie youtube-music--cookie)))
         (youtube-music--credentials-save (list :cookie new-cookie))
