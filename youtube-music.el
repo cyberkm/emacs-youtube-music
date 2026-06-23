@@ -644,7 +644,7 @@ refresh it in place without disturbing the rest of the buffer."
 (defun youtube-music--update-now-playing ()
   "Refresh only the Now Playing block in place.
 Falls back to a full rerender if the tagged region is missing
-(e.g. before the first paint)."
+\(e.g. before the first paint)."
   (if-let* ((buf (get-buffer youtube-music-buffer-name)))
       (with-current-buffer buf
         (let ((beg (text-property-any (point-min) (point-max)
