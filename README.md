@@ -1,4 +1,5 @@
 # youtube-music
+[![MELPA](https://melpa.org/packages/youtube-music-badge.svg)](https://melpa.org/#/youtube-music)
 
 YouTube Music. In Emacs.
 
