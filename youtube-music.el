@@ -5,7 +5,7 @@
 ;; Author: Pavel Bibergal <pavel@keewano.com>
 ;; Assisted-by: Claude:claude-opus-4-7
 ;; URL: https://github.com/cyberkm/emacs-youtube-music
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: multimedia, youtube, music
 
@@ -188,6 +188,9 @@ Recognised tokens:
 (defvar youtube-music--ipc-process nil
   "The network process connected to mpv's IPC socket, or nil.")
 
+(defvar youtube-music--socket-dir nil
+  "Cached private directory that holds the mpv IPC socket, or nil.")
+
 (defvar youtube-music--socket-path nil
   "Cached UNIX socket path used for the mpv IPC server.")
 
@@ -255,8 +258,18 @@ Reset on manual login / logout.")
   "Return the IPC socket path, computing it once on first use."
   (or youtube-music--socket-path
       (setq youtube-music--socket-path
-            (expand-file-name (format "youtube-music-mpv-%d.sock" (user-uid))
-                              temporary-file-directory))))
+            (expand-file-name
+             "mpv.sock"
+             (setq youtube-music--socket-dir
+                   (make-temp-file "youtube-music-" 'directory))))))
+
+(defun youtube-music--cleanup-socket ()
+  "Remove the private socket directory created for mpv, if any.
+Clears the cached paths so a fresh directory is minted next start."
+  (when youtube-music--socket-dir
+    (ignore-errors (delete-directory youtube-music--socket-dir t)))
+  (setq youtube-music--socket-dir nil
+        youtube-music--socket-path nil))
 
 (defun youtube-music--mpv-running-p ()
   "Return non-nil when the mpv subprocess is alive."
@@ -282,6 +295,7 @@ mode-line indicator."
     (setq youtube-music--liked-set nil
           youtube-music--shuffled-p nil)
     (clrhash youtube-music--disliked-set)
+    (youtube-music--cleanup-socket)
     (youtube-music--refresh-modeline)
     (youtube-music--rerender)))
 
@@ -925,6 +939,7 @@ mpris module, etc.) stop seeing a YouTube Music player.  Use
   (clrhash youtube-music--track-meta)
   (setq youtube-music--liked-set nil)
   (clrhash youtube-music--disliked-set)
+  (youtube-music--cleanup-socket)
   (force-mode-line-update t)
   (when-let ((win (get-buffer-window youtube-music-buffer-name t)))
     (quit-window nil win)))
