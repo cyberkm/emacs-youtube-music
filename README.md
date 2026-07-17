@@ -29,7 +29,9 @@ music from your YouTube Music library. Press `?` for the menu.
 
 ## What it does
 
-- Search and play. `s` to queue, `S` to play now.
+- Search songs and playlists. `s` to queue, `S` to play now.
+  One prompt, two groups: pick a song to play it, pick a
+  playlist to queue the whole thing.
 - Browse your liked songs, your saved playlists, and YouTube
   Music Home (Discover Mix, Replay Mix, New releases, Albums for
   you, …).

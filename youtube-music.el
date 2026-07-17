@@ -3,9 +3,9 @@
 ;; Copyright (C) 2026 Pavel Bibergal
 
 ;; Author: Pavel Bibergal <pavel@keewano.com>
-;; Assisted-by: Claude:claude-opus-4-7
+;; Assisted-by: Claude:claude-fable-5
 ;; URL: https://github.com/cyberkm/emacs-youtube-music
-;; Version: 0.1.1
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: multimedia, youtube, music
 
@@ -26,39 +26,32 @@
 
 ;;; Commentary:
 
-;; youtube-music.el is a YouTube Music client for Emacs.  It uses
-;; `mpv' as its playback backend (over a JSON IPC socket) and -- in
-;; later phases -- the YouTube Music internal API for browsing and
-;; search.
+;; youtube-music.el is a YouTube Music client for Emacs.  Playback is
+;; handled by an `mpv' subprocess, controlled over a JSON IPC socket;
+;; browsing and search talk to the YouTube Music API directly.
 ;;
 ;; The primary entry point is `M-x youtube-music', which pops a status
 ;; buffer styled after Magit: a Now Playing section, the upcoming
 ;; queue, and browseable sources.  Press `C-h m' inside the buffer to
 ;; see every key binding.
 ;;
-;; Phase 1 ships the playback skeleton:
+;; Features:
 ;;
-;;   - spawn and supervise an `mpv' subprocess,
-;;   - send commands and receive events over a UNIX-socket IPC channel,
-;;   - track playback state via property observation,
-;;   - render a status buffer with a magit-style sectioned layout,
-;;   - display now-playing information in the global mode line.
+;;   - search songs and playlists in one prompt: picking a song
+;;     plays that one track, picking a playlist queues it whole,
+;;   - browse your library (`M-x youtube-music-library'): liked
+;;     songs, saved playlists, and the personalized Home shelves,
+;;   - start a radio of similar tracks from any song,
+;;   - like / dislike tracks, shuffle, repeat, seek, edit the queue,
+;;   - now-playing info in the global mode line, plus MPRIS support
+;;     so desktop media controllers (playerctl, waybar, media keys)
+;;     see the player,
+;;   - one-keypress login: the YouTube Music cookie is pulled from
+;;     your browser (Firefox, Chrome, Chromium, Brave, Edge, Safari)
+;;     via yt-dlp, stored in a 0600 credentials file, and silently
+;;     re-extracted when it expires.
 ;;
-;; Phase 2 adds the YouTube Music API client and search:
-;;
-;;   - cookie-based authentication, stored in a 0600 credentials file,
-;;   - signed youtubei/v1 POST requests with SAPISIDHASH auth,
-;;   - `M-x youtube-music-search' to find songs and play one.
-;;
-;; Phase 3 adds login/logout management and library browse:
-;;
-;;   - `M-x youtube-music-auth' transient (login / logout / status),
-;;   - `M-x youtube-music-liked'  to play your liked-songs list,
-;;   - `M-x youtube-music-library-playlists' to pick and play a saved
-;;     playlist,
-;;   - `M-x youtube-music-library' transient that groups the above.
-;;
-;; OAuth device flow is intentionally deferred: Google has been
+;; OAuth device flow is intentionally not used: Google has been
 ;; restricting which client_ids may grant the YouTube Music scopes,
 ;; so the unofficial-OAuth path is currently unreliable.  The cookie
 ;; flow is robust and is used by `ytmusicapi' and `ytermusic' alike.
@@ -128,6 +121,13 @@ Recognised tokens:
 
 (defcustom youtube-music-progress-bar-width 30
   "Width, in characters, of the now-playing progress bar."
+  :type 'integer)
+
+(defcustom youtube-music-search-max-results 5
+  "How many search results to show per category initially.
+Each truncated category ends with a \"More ...\" entry that
+expands it to everything the API returned (about 20 per
+category), instantly and without another request."
   :type 'integer)
 
 (defcustom youtube-music-buffer-name "*youtube-music*"
@@ -401,7 +401,7 @@ EVENT is the `process-status' string supplied by Emacs."
       (message "youtube-music: mpv error: %s" err))
     (cond
      (rid
-      (when-let ((cb (gethash rid youtube-music--pending-requests)))
+      (when-let* ((cb (gethash rid youtube-music--pending-requests)))
         (remhash rid youtube-music--pending-requests)
         (funcall cb msg)))
      ((equal event "property-change")
@@ -574,7 +574,7 @@ EVENT is the `process-status' string supplied by Emacs."
 
 (defun youtube-music--rerender ()
   "Redraw the status buffer if it exists, preserving point and scroll."
-  (when-let ((buf (get-buffer youtube-music-buffer-name)))
+  (when-let* ((buf (get-buffer youtube-music-buffer-name)))
     (with-current-buffer buf
       (let* ((inhibit-read-only t)
              (line (line-number-at-pos))
@@ -831,7 +831,12 @@ Leaves the current playlist intact."
 (defun youtube-music-toggle-shuffle ()
   "Shuffle (or un-shuffle) the current mpv playlist.
 Uses mpv's `playlist-shuffle' / `playlist-unshuffle' commands so
-that subsequent `youtube-music-next' calls follow the new order."
+that subsequent `youtube-music-next' calls follow the new order.
+The playing track is moved back to the top after shuffling --
+mpv shuffles it along with everything else, which would strand a
+random prefix of the queue as \"already played\".  Un-shuffling
+still restores the original order (mpv sorts by each entry's
+original index, which the move does not disturb)."
   (interactive)
   (youtube-music--require-track)
   (cond
@@ -841,6 +846,12 @@ that subsequent `youtube-music-next' calls follow the new order."
     (message "youtube-music: shuffle off"))
    (t
     (youtube-music--send '("playlist-shuffle"))
+    (youtube-music--send
+     '("get_property" "playlist-pos")
+     (lambda (msg)
+       (let ((pos (plist-get msg :data)))
+         (when (and (numberp pos) (> pos 0))
+           (youtube-music--send `("playlist-move" ,pos 0))))))
     (setq youtube-music--shuffled-p t)
     (message "youtube-music: shuffle on")))
   (youtube-music--rerender))
@@ -941,7 +952,7 @@ mpris module, etc.) stop seeing a YouTube Music player.  Use
   (clrhash youtube-music--disliked-set)
   (youtube-music--cleanup-socket)
   (force-mode-line-update t)
-  (when-let ((win (get-buffer-window youtube-music-buffer-name t)))
+  (when-let* ((win (get-buffer-window youtube-music-buffer-name t)))
     (quit-window nil win)))
 
 ;;;; Authentication
@@ -986,7 +997,7 @@ file is created with mode 0600."
 (defun youtube-music--auth-load ()
   "Hydrate `youtube-music--cookie' / `youtube-music--sapisid' from disk."
   (unless youtube-music--cookie
-    (when-let ((creds (youtube-music--credentials-load)))
+    (when-let* ((creds (youtube-music--credentials-load)))
       (setq youtube-music--cookie (plist-get creds :cookie)
             youtube-music--sapisid (youtube-music--extract-sapisid
                                     youtube-music--cookie)))))
@@ -1232,15 +1243,22 @@ EXTRA-QUERY, if non-nil, is appended to the URL query string."
                 youtube-music--sapisid
                 youtube-music--api-origin))
          (url-request-method "POST")
+         ;; Header values must be unibyte: url-http rejects a request
+         ;; whose assembled string contains multibyte text, and the
+         ;; cookie (read from disk into a multibyte buffer) would
+         ;; otherwise flip the concatenated request to multibyte the
+         ;; moment the body carries a non-ASCII query.
          (url-request-extra-headers
-          `(("User-Agent" . ,youtube-music-user-agent)
-            ("Cookie" . ,youtube-music--cookie)
-            ("Authorization" . ,auth)
-            ("X-Origin" . ,youtube-music--api-origin)
-            ("X-Goog-AuthUser" . "0")
-            ("Origin" . ,youtube-music--api-origin)
-            ("Content-Type" . "application/json; charset=UTF-8")
-            ("Accept" . "*/*")))
+          (mapcar (lambda (h)
+                    (cons (car h) (encode-coding-string (cdr h) 'utf-8)))
+                  `(("User-Agent" . ,youtube-music-user-agent)
+                    ("Cookie" . ,youtube-music--cookie)
+                    ("Authorization" . ,auth)
+                    ("X-Origin" . ,youtube-music--api-origin)
+                    ("X-Goog-AuthUser" . "0")
+                    ("Origin" . ,youtube-music--api-origin)
+                    ("Content-Type" . "application/json; charset=UTF-8")
+                    ("Accept" . "*/*"))))
          (url-request-data (encode-coding-string json-body 'utf-8)))
     (url-retrieve url
                   (lambda (status)
@@ -1294,7 +1312,7 @@ Symbol/keyword keys go through `plist-get'; integer keys index vectors."
 (defun youtube-music--parse-list-item (item)
   "Parse a `musicResponsiveListItemRenderer' ITEM into a result plist.
 Returns plist with :title, :subtitle, :video-id, or nil on miss."
-  (when-let ((mrli (plist-get item :musicResponsiveListItemRenderer)))
+  (when-let* ((mrli (plist-get item :musicResponsiveListItemRenderer)))
     (let* ((flex (plist-get mrli :flexColumns))
            (title (when (and flex (> (length flex) 0))
                     (youtube-music--flex-text (aref flex 0))))
@@ -1314,75 +1332,289 @@ Returns plist with :title, :subtitle, :video-id, or nil on miss."
       (when (and title video-id)
         (list :title title :subtitle (or subtitle "") :video-id video-id)))))
 
-(defun youtube-music--parse-search-results (response)
-  "Extract a list of song result plists from search RESPONSE."
-  (let ((tabs (youtube-music--get-in
-               response [:contents :tabbedSearchResultsRenderer :tabs])))
-    (when (and tabs (> (length tabs) 0))
-      (let* ((tab (aref tabs 0))
-             (sections (youtube-music--get-in
-                        tab [:tabRenderer :content
-                             :sectionListRenderer :contents]))
-             results)
-        (when sections
-          (cl-loop
-           for section across sections
-           for shelf = (plist-get section :musicShelfRenderer)
-           when shelf
-           do (cl-loop
-               for entry across (plist-get shelf :contents)
-               for parsed = (youtube-music--parse-list-item entry)
-               when parsed do (push parsed results))))
-        (nreverse results)))))
+(defconst youtube-music--search-page-type-kinds
+  '(("MUSIC_PAGE_TYPE_ALBUM"    . album)
+    ("MUSIC_PAGE_TYPE_PLAYLIST" . playlist))
+  "Map of browseEndpoint pageType values to item kinds.
+Kinds we cannot queue directly (artists, profiles, podcast shows)
+are deliberately absent; results of those kinds are dropped.")
 
-;;;; Search command
+(defun youtube-music--clean-subtitle (subtitle)
+  "Drop the leading category token from a search-result SUBTITLE.
+Flat-layout search results prefix it with \"Song • \", \"Video • \",
+\"Artist • \", etc.  The category is already conveyed by the
+result's group heading (and song vs video makes no difference to
+an audio-only player), so it is pure noise here.  Episodes keep
+their prefix: landing in an hour-long podcast is worth flagging."
+  (if (and subtitle
+           (string-match
+            "\\`\\(?:Song\\|Video\\|Album\\|Playlist\\|Artist\\|Profile\\) • "
+            subtitle))
+      (substring subtitle (match-end 0))
+    (or subtitle "")))
+
+(defun youtube-music--parse-search-item (item)
+  "Parse search-result ITEM into a plist tagged with a :kind.
+Albums, playlists, and artists yield (:kind album|playlist|artist
+:browse-id ...); anything with a videoId falls back to (:kind song
+:video-id ...).  All carry :title and :subtitle.  Returns nil for
+shapes we cannot play."
+  (when-let* ((mrli (plist-get item :musicResponsiveListItemRenderer)))
+    (let* ((browse-id (youtube-music--get-in
+                       mrli [:navigationEndpoint :browseEndpoint :browseId]))
+           (page-type (youtube-music--get-in
+                       mrli [:navigationEndpoint :browseEndpoint
+                             :browseEndpointContextSupportedConfigs
+                             :browseEndpointContextMusicConfig :pageType]))
+           (kind (cdr (assoc page-type youtube-music--search-page-type-kinds))))
+      (if (and browse-id kind)
+          (let* ((flex (plist-get mrli :flexColumns))
+                 (title (when (and flex (> (length flex) 0))
+                          (youtube-music--flex-text (aref flex 0))))
+                 (subtitle (when (and flex (> (length flex) 1))
+                             (youtube-music--flex-text (aref flex 1)))))
+            (when title
+              (list :title title
+                    :subtitle (youtube-music--clean-subtitle subtitle)
+                    :kind kind :browse-id browse-id)))
+        (when-let* ((song (youtube-music--parse-list-item item)))
+          (plist-put song :subtitle
+                     (youtube-music--clean-subtitle
+                      (plist-get song :subtitle)))
+          (append song (list :kind 'song)))))))
 
 (defconst youtube-music--search-songs-params
   "EgWKAQIIAWoMEA4QChADEAQQCRAF"
-  "Search-params blob restricting results to songs.")
+  "Search params blob restricting results to songs.
+Same fixed value the web client sends; not account-specific.")
 
-(defun youtube-music--prompt-and-act (entries enqueue)
-  "Prompt the user to pick from ENTRIES and play (or ENQUEUE) the chosen.
-When ENQUEUE is non-nil the chosen track is appended to mpv's
-playlist; otherwise it replaces it."
-  (let* ((labels (mapcar (lambda (e)
-                           (cons (format "%s — %s"
-                                         (plist-get e :title)
-                                         (plist-get e :subtitle))
-                                 e))
-                         entries))
-         (prompt (if enqueue "Enqueue: " "Play: "))
-         (choice (completing-read prompt labels nil t))
-         (entry (cdr (assoc choice labels))))
-    (when entry
-      (youtube-music--remember-tracks (list entry))
-      (let ((url (format "https://music.youtube.com/watch?v=%s"
-                         (plist-get entry :video-id))))
-        (if enqueue
-            (youtube-music-enqueue-url url)
-          (youtube-music-play-url url))))))
+(defconst youtube-music--search-playlists-params
+  "EgeKAQQoAEABagwQDhAKEAMQBBAJEAU%3D"
+  "Search params blob restricting results to community playlists.
+Community playlists are the user-curated ones -- exactly what a
+search like \"<artist> greatest hits\" should surface.  Same fixed
+value the web client sends; not account-specific.")
+
+(defun youtube-music--parse-search-items (response)
+  "Extract parsed items from a filtered search RESPONSE.
+Walks every `musicShelfRenderer' under the first search tab and
+returns the concatenated `youtube-music--parse-search-item' plists."
+  (let ((sections (youtube-music--get-in
+                   response [:contents :tabbedSearchResultsRenderer
+                             :tabs 0 :tabRenderer :content
+                             :sectionListRenderer :contents])))
+    (when sections
+      (cl-loop
+       for section across sections
+       ;; Some layouts wrap the shelf in a one-element
+       ;; itemSectionRenderer; unwrap transparently.
+       for shelf = (or (plist-get section :musicShelfRenderer)
+                       (youtube-music--get-in
+                        section [:itemSectionRenderer :contents 0
+                                 :musicShelfRenderer]))
+       when shelf
+       nconc (cl-loop
+              for e across (or (plist-get shelf :contents) [])
+              for p = (youtube-music--parse-search-item e)
+              when p collect p)))))
+
+;;;; Search command
+
+(defvar youtube-music--search-history nil
+  "Minibuffer history for search queries.")
+
+(defvar youtube-music--pick-history nil
+  "Minibuffer history for result-pick prompts.
+Kept separate from `youtube-music--search-history' and from the
+global `minibuffer-history' so that recalling history in the
+search prompt yields previous queries, never result labels.")
+
+(defun youtube-music--mixed-kinds-p (items)
+  "Return non-nil when ITEMS do not all share the same :kind."
+  (let ((first (plist-get (car items) :kind)))
+    (cl-some (lambda (it) (not (eq (plist-get it :kind) first)))
+             (cdr items))))
+
+(defun youtube-music--item-label (item &optional with-kind)
+  "Return the completion label for ITEM.
+When WITH-KIND is non-nil the item's kind leads the label
+\(\"Artist: ...\"), so mixed-kind lists say up front what pressing
+RET will do."
+  (let* ((title (plist-get item :title))
+         (sub (or (plist-get item :subtitle) ""))
+         (base (if (string-empty-p sub) title
+                 (format "%s — %s" title sub))))
+    (if with-kind
+        (format "%s: %s"
+                (capitalize (symbol-name (plist-get item :kind)))
+                base)
+      base)))
+
+(defun youtube-music--search-candidates (shelves)
+  "Flatten SHELVES into an ordered alist of (LABEL . ITEM).
+Labels carry a `youtube-music-group' text property naming their
+shelf, which the completion UI turns into group headings.  In
+shelves that mix kinds each label leads with its kind.  A shelf
+with a :limit smaller than its item count is truncated there and
+gets a trailing \"More ...\" entry carrying the full list."
+  (let ((seen (make-hash-table :test 'equal))
+        cands)
+    (cl-flet ((add (label item group)
+                (let ((n (gethash label seen 0)))
+                  (puthash label (1+ n) seen)
+                  (when (> n 0) (setq label (format "%s (%d)" label (1+ n)))))
+                (push (cons (propertize label 'youtube-music-group group) item)
+                      cands)))
+      (dolist (shelf shelves)
+        (let* ((group (plist-get shelf :title))
+               (items (plist-get shelf :items))
+               (limit (plist-get shelf :limit))
+               (truncated (and limit (> (length items) limit)))
+               (shown (if truncated (take limit items) items))
+               (mixed (youtube-music--mixed-kinds-p shown)))
+          (dolist (item shown)
+            (add (youtube-music--item-label item mixed) item group))
+          (when truncated
+            (add (format "More %s… (%d more)"
+                         (downcase group) (- (length items) limit))
+                 (list :kind 'expand :title group :items items)
+                 group)))))
+    (nreverse cands)))
+
+(defun youtube-music--candidate-group (candidate transform)
+  "Return the shelf heading for CANDIDATE, per `group-function'.
+When TRANSFORM is non-nil return CANDIDATE itself unchanged."
+  (if transform candidate
+    (get-text-property 0 'youtube-music-group candidate)))
+
+(defun youtube-music--read-search-item (prompt candidates)
+  "Pick one of CANDIDATES (a (LABEL . ITEM) alist) with PROMPT.
+Candidates keep the API's relevance order and are grouped by shelf
+in UIs that support `group-function' (vertico, the *Completions*
+buffer).  Returns the chosen ITEM, or nil."
+  (let* ((table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      '(metadata
+                        (category . youtube-music-search-item)
+                        (group-function . youtube-music--candidate-group)
+                        (display-sort-function . identity)
+                        (cycle-sort-function . identity))
+                    (complete-with-action action candidates string pred))))
+         (choice (completing-read prompt table nil t nil
+                                  'youtube-music--pick-history)))
+    (cdr (assoc choice candidates))))
+
+(defun youtube-music--act-on-item (item &optional enqueue)
+  "Play ITEM, or append it to the queue when ENQUEUE is non-nil.
+ITEM is a plist from the search or home parsers.  Songs load
+directly; albums and playlists queue every track via the browse
+API."
+  (pcase (plist-get item :kind)
+    ('song
+     (youtube-music--remember-tracks (list item))
+     (let ((url (format "https://music.youtube.com/watch?v=%s"
+                        (plist-get item :video-id))))
+       (if enqueue (youtube-music-enqueue-url url)
+         (youtube-music-play-url url))))
+    ((or 'album 'browse)
+     (youtube-music--play-playlist-by-browse-id
+      (plist-get item :browse-id) enqueue))
+    ('playlist
+     (let ((pid (plist-get item :playlist-id))
+           (vid (plist-get item :video-id))
+           (bid (plist-get item :browse-id)))
+       (cond
+        ;; "Liked Music" — yt-dlp can't expand `?list=LM'; route through
+        ;; the API path that knows about the FEmusic_liked_videos browse.
+        ((or (equal pid "LM") (equal bid "VLLM"))
+         (youtube-music-liked))
+        (bid (youtube-music--play-playlist-by-browse-id bid enqueue))
+        (pid
+         (let ((url (if vid
+                        (format "https://music.youtube.com/watch?v=%s&list=%s"
+                                vid pid)
+                      (format "https://music.youtube.com/playlist?list=%s"
+                              pid))))
+           (if enqueue (youtube-music-enqueue-url url)
+             (youtube-music-play-url url)))))))
+    (_ (user-error "Unsupported item kind"))))
+
+(defun youtube-music--prompt-shelf-items (title items enqueue)
+  "Pick one of ITEMS from the shelf TITLE and act on it.
+ENQUEUE is passed through to `youtube-music--act-on-item'."
+  (let* ((mixed (youtube-music--mixed-kinds-p items))
+         (labels (mapcar (lambda (it)
+                           (cons (youtube-music--item-label it mixed) it))
+                         items))
+         (choice (completing-read (format "%s — pick: " title) labels nil t
+                                  nil 'youtube-music--pick-history))
+         (item (cdr (assoc choice labels))))
+    (when item (youtube-music--act-on-item item enqueue))))
+
+(defun youtube-music--search-offer (shelves enqueue)
+  "Prompt for one item across SHELVES and act on it.
+When ENQUEUE is non-nil the pick is appended to the queue instead
+of replacing it.  Picking a \"More ...\" entry re-prompts with
+that category expanded to its full list."
+  (let* ((cands (youtube-music--search-candidates shelves))
+         (item (youtube-music--read-search-item
+                (if enqueue "Enqueue: " "Play: ") cands)))
+    (cond
+     ((null item) nil)
+     ((eq (plist-get item :kind) 'expand)
+      (youtube-music--search-offer
+       (list (list :title (plist-get item :title)
+                   :items (plist-get item :items)))
+       enqueue))
+     (t (youtube-music--act-on-item item enqueue)))))
 
 ;;;###autoload
 (defun youtube-music-search (query &optional enqueue)
-  "Search YouTube Music for QUERY and offer to play a result.
-With a prefix argument, ENQUEUE the chosen result instead of
-replacing the current playlist."
-  (interactive (list (read-string "Search YouTube Music: ")
+  "Search YouTube Music for QUERY; pick a song or a playlist.
+One prompt, two groups: songs and community playlists.  Picking a
+song plays that one track; picking a playlist queues the whole
+thing.  Each group shows the top `youtube-music-search-max-results'
+hits; the \"More ...\" entry expands a group to the full list.
+With a prefix argument, ENQUEUE the pick at the end of the
+current queue instead of replacing it."
+  (interactive (list (read-string "Search YouTube Music: " nil
+                                  'youtube-music--search-history)
                      current-prefix-arg))
   (message "youtube-music: searching for %s..." query)
-  (youtube-music--youtubei-post
-   "search"
-   `((query . ,query) (params . ,youtube-music--search-songs-params))
-   (lambda (response)
-     (let ((results (youtube-music--parse-search-results response)))
-       (cond
-        ((null results) (message "youtube-music: no results for %s" query))
-        (t (youtube-music--prompt-and-act results enqueue)))))))
+  (let ((pending 2) songs playlists)
+    (cl-flet ((step ()
+                (when (zerop (cl-decf pending))
+                  (if (and (null songs) (null playlists))
+                      (message "youtube-music: no results for %s" query)
+                    (youtube-music--search-offer
+                     (let ((limit youtube-music-search-max-results))
+                       (delq nil
+                             (list
+                              (and songs (list :title "Songs"
+                                               :items songs :limit limit))
+                              (and playlists (list :title "Playlists"
+                                                   :items playlists
+                                                   :limit limit)))))
+                     enqueue)))))
+      (youtube-music--youtubei-post
+       "search" `((query . ,query)
+                  (params . ,youtube-music--search-songs-params))
+       (lambda (response)
+         (setq songs (youtube-music--parse-search-items response))
+         (step)))
+      (youtube-music--youtubei-post
+       "search" `((query . ,query)
+                  (params . ,youtube-music--search-playlists-params))
+       (lambda (response)
+         (setq playlists (youtube-music--parse-search-items response))
+         (step))))))
 
 ;;;###autoload
 (defun youtube-music-search-enqueue (query)
-  "Search YouTube Music for QUERY and append the chosen result to the queue."
-  (interactive "sEnqueue from YouTube Music: ")
+  "Search YouTube Music for QUERY and append the chosen pick to the queue.
+Playlists are appended whole."
+  (interactive (list (read-string "Enqueue from YouTube Music: " nil
+                                  'youtube-music--search-history)))
   (youtube-music-search query t))
 
 ;;;; Library browse — parsers
@@ -1483,7 +1715,7 @@ the final list."
 
 (defun youtube-music--parse-playlist-tile (item)
   "Parse a `musicTwoRowItemRenderer' ITEM into (TITLE . BROWSE-ID), or nil."
-  (when-let ((tri (plist-get item :musicTwoRowItemRenderer)))
+  (when-let* ((tri (plist-get item :musicTwoRowItemRenderer)))
     (let* ((runs (youtube-music--get-in tri [:title :runs]))
            (title (when (and runs (> (length runs) 0))
                     (plist-get (aref runs 0) :text)))
@@ -1544,20 +1776,25 @@ Falls back to URL-OR-PATH if neither yields anything useful."
       mpv-title)
      (t (or url-or-path "")))))
 
-(defun youtube-music--play-tracks (tracks)
-  "Replace mpv's playlist with TRACKS (list of result plists)."
+(defun youtube-music--play-tracks (tracks &optional enqueue)
+  "Hand TRACKS (list of result plists) to mpv.
+Replaces the current playlist, or appends to it when ENQUEUE is
+non-nil."
   (youtube-music--remember-tracks tracks)
-  (setq youtube-music--shuffled-p nil)
+  (unless enqueue (setq youtube-music--shuffled-p nil))
   (cl-loop for tr in tracks
            for first = t then nil
            do (youtube-music--send
                `("loadfile"
                  ,(format "https://music.youtube.com/watch?v=%s"
                           (plist-get tr :video-id))
-                 ,(if first "replace" "append")))))
+                 ,(cond (enqueue "append-play")
+                        (first "replace")
+                        (t "append"))))))
 
-(defun youtube-music--play-playlist-by-browse-id (browse-id)
-  "Play the playlist / mix / album referenced by BROWSE-ID.
+(defun youtube-music--play-playlist-by-browse-id (browse-id &optional enqueue)
+  "Queue the playlist / mix / album referenced by BROWSE-ID.
+Replaces the current queue, or appends when ENQUEUE is non-nil.
 Always fetches via the API and queues the resolved tracks
 individually -- handing playlist URLs (especially `?list=LM' for
 Liked Music) to yt-dlp doesn't reliably expand them."
@@ -1566,15 +1803,17 @@ Liked Music) to yt-dlp doesn't reliably expand them."
    browse-id
    (lambda (tracks)
      (cond
+      ((eq tracks 'auth-failed) nil)
       ((null tracks) (message "youtube-music: empty or unparseable playlist"))
-      (t (youtube-music--play-tracks tracks)
-         (message "youtube-music: queued %d tracks" (length tracks)))))))
+      (t (youtube-music--play-tracks tracks enqueue)
+         (message "youtube-music: %s %d tracks"
+                  (if enqueue "appended" "queued") (length tracks)))))))
 
 (defun youtube-music--populate-liked-set (tracks)
   "Replace `youtube-music--liked-set' with the videoIds from TRACKS."
   (setq youtube-music--liked-set (make-hash-table :test 'equal))
   (dolist (tr tracks)
-    (when-let ((vid (plist-get tr :video-id)))
+    (when-let* ((vid (plist-get tr :video-id)))
       (puthash vid t youtube-music--liked-set))))
 
 (defun youtube-music--logged-in-flag (response)
@@ -1804,7 +2043,8 @@ This is what powers the thumbs-up indicator on tracks."
        (let ((entries (youtube-music--parse-playlist-shelf response)))
          (cond
           ((null entries) (message "youtube-music: no playlists found"))
-          (t (let* ((choice (completing-read "Playlist: " entries nil t))
+          (t (let* ((choice (completing-read "Playlist: " entries nil t nil
+                                             'youtube-music--pick-history))
                     (browse-id (cdr (assoc choice entries))))
                (when browse-id
                  (youtube-music--play-playlist-by-browse-id browse-id)))))))))))
@@ -1850,7 +2090,7 @@ shape is unfamiliar."
               :playlist-id pid
               :browse-id bid))))
    ((plist-get item :musicResponsiveListItemRenderer)
-    (when-let ((parsed (youtube-music--parse-list-item item)))
+    (when-let* ((parsed (youtube-music--parse-list-item item)))
       (list :title (plist-get parsed :title)
             :subtitle (plist-get parsed :subtitle)
             :kind 'song
@@ -1886,47 +2126,13 @@ shape is unfamiliar."
             (when parsed (push (cons title parsed) results)))))
     (nreverse results)))
 
-(defun youtube-music--play-home-item (item)
-  "Play a home ITEM plist (song, playlist/mix, or browseable list)."
-  (pcase (plist-get item :kind)
-    ('song
-     (youtube-music--remember-tracks (list item))
-     (youtube-music-play-url
-      (format "https://music.youtube.com/watch?v=%s"
-              (plist-get item :video-id))))
-    ('playlist
-     (let ((pid (plist-get item :playlist-id))
-           (vid (plist-get item :video-id))
-           (bid (plist-get item :browse-id)))
-       (cond
-        ;; "Liked Music" — yt-dlp can't expand `?list=LM'; route through
-        ;; the API path that knows about the FEmusic_liked_videos browse.
-        ((or (equal pid "LM") (equal bid "VLLM"))
-         (youtube-music-liked))
-        (t (youtube-music-play-url
-            (if vid
-                (format "https://music.youtube.com/watch?v=%s&list=%s" vid pid)
-              (format "https://music.youtube.com/playlist?list=%s" pid)))))))
-    ('browse
-     (youtube-music--play-playlist-by-browse-id
-      (plist-get item :browse-id)))
-    (_ (user-error "Unsupported home-item kind"))))
-
 (defun youtube-music--prompt-home (shelves)
   "Run the two-step pick UI on SHELVES (alist of TITLE → ITEMS)."
-  (let* ((shelf-title (completing-read "Shelf: " shelves nil t))
+  (let* ((shelf-title (completing-read "Shelf: " shelves nil t nil
+                                       'youtube-music--pick-history))
          (items (cdr (assoc shelf-title shelves))))
     (when items
-      (let* ((labels (mapcar (lambda (it)
-                               (cons (format "%s — %s"
-                                             (plist-get it :title)
-                                             (plist-get it :subtitle))
-                                     it))
-                             items))
-             (choice (completing-read (format "%s — pick: " shelf-title)
-                                      labels nil t))
-             (item (cdr (assoc choice labels))))
-        (when item (youtube-music--play-home-item item))))))
+      (youtube-music--prompt-shelf-items shelf-title items nil))))
 
 ;;;###autoload
 (defun youtube-music-home ()
@@ -1982,7 +2188,7 @@ Otherwise, return whatever is currently playing."
 
 (defun youtube-music--display-title-from-vid (vid)
   "Return the cached \"Title — Subtitle\" for VID, or nil."
-  (when-let ((meta (gethash vid youtube-music--track-meta)))
+  (when-let* ((meta (gethash vid youtube-music--track-meta)))
     (let ((sub (plist-get meta :subtitle)))
       (if (and sub (not (string-empty-p sub)))
           (format "%s — %s" (plist-get meta :title) sub)
@@ -2105,6 +2311,23 @@ emoji cannot be displayed in the current fontset.")
                     results)))))
     (nreverse results)))
 
+(defun youtube-music--start-radio (body enqueue)
+  "POST BODY to the `next' endpoint and queue the returned radio tracks.
+Replaces the current queue, or appends when ENQUEUE is non-nil."
+  (message "youtube-music: starting radio...")
+  (youtube-music--youtubei-post
+   "next" body
+   (lambda (response)
+     (let ((tracks (youtube-music--parse-radio-tracks response)))
+       (cond
+        ((null tracks)
+         (message "youtube-music: no radio tracks returned"))
+        (t
+         (youtube-music--play-tracks tracks enqueue)
+         (message "youtube-music: radio %s (%d tracks)"
+                  (if enqueue "appended" "queued")
+                  (length tracks))))))))
+
 ;;;###autoload
 (defun youtube-music-radio (&optional enqueue)
   "Start a radio of songs similar to the track at point or now playing.
@@ -2114,30 +2337,9 @@ current queue instead of replacing it."
   (let ((vid (youtube-music--video-id-at-point-or-current)))
     (cond
      ((null vid) (youtube-music--complain-no-vid "start radio"))
-     (t
-      (message "youtube-music: starting radio...")
-      (youtube-music--youtubei-post
-       "next"
-       `((videoId . ,vid) (playlistId . ,(format "RDAMVM%s" vid)))
-       (lambda (response)
-         (let ((tracks (youtube-music--parse-radio-tracks response)))
-           (cond
-            ((null tracks)
-             (message "youtube-music: no radio tracks returned"))
-            (t
-             (youtube-music--remember-tracks tracks)
-             (cond
-              (enqueue
-               (cl-loop for tr in tracks
-                        do (youtube-music--send
-                            `("loadfile"
-                              ,(format "https://music.youtube.com/watch?v=%s"
-                                       (plist-get tr :video-id))
-                              "append-play"))))
-              (t (youtube-music--play-tracks tracks)))
-             (message "youtube-music: radio %s (%d tracks)"
-                      (if enqueue "appended" "queued")
-                      (length tracks)))))))))))
+     (t (youtube-music--start-radio
+         `((videoId . ,vid) (playlistId . ,(format "RDAMVM%s" vid)))
+         enqueue)))))
 
 ;;;; Status-buffer transient menu
 
