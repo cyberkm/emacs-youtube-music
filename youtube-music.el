@@ -1525,7 +1525,7 @@ API."
            (bid (plist-get item :browse-id)))
        (cond
         ;; "Liked Music" — yt-dlp can't expand `?list=LM'; route through
-        ;; the API path that knows about the FEmusic_liked_videos browse.
+        ;; the API path that fetches the VLLM browse page by page.
         ((or (equal pid "LM") (equal bid "VLLM"))
          (youtube-music-liked))
         (bid (youtube-music--play-playlist-by-browse-id bid enqueue))
@@ -1658,30 +1658,59 @@ section content."
            when parsed do (push parsed results))))
     (nreverse results)))
 
+(defun youtube-music--trailing-continuation-token (items)
+  "Return the token from a `continuationItemRenderer' ending ITEMS, or nil.
+Newer playlist responses no longer carry a `continuations' block
+on the shelf; instead the last entry of the contents vector is a
+`continuationItemRenderer' holding a `continuationCommand' token."
+  (when (and (vectorp items) (> (length items) 0))
+    (youtube-music--get-in
+     (aref items (1- (length items)))
+     [:continuationItemRenderer :continuationEndpoint
+      :continuationCommand :token])))
+
 (defun youtube-music--shelf-continuation-token (response)
   "Return a continuation token from a browse RESPONSE, or nil.
 Looks at `musicPlaylistShelfRenderer' and `musicShelfRenderer'
-shelves under the section list."
+shelves under the section list, accepting both the legacy
+`continuations' block and the trailing `continuationItemRenderer'
+shape (see `youtube-music--trailing-continuation-token')."
   (let ((sections (youtube-music--browse-section-list response)))
     (cl-loop
      for section across (or sections [])
      for shelf = (or (plist-get section :musicPlaylistShelfRenderer)
                      (plist-get section :musicShelfRenderer))
      when shelf
-     for tok = (youtube-music--get-in
-                shelf [:continuations 0 :nextContinuationData :continuation])
+     for tok = (or (youtube-music--get-in
+                    shelf [:continuations 0 :nextContinuationData :continuation])
+                   (youtube-music--trailing-continuation-token
+                    (plist-get shelf :contents)))
      when tok return tok)))
 
 (defun youtube-music--parse-track-continuation (response)
   "Parse a continuation RESPONSE returned by a `?continuation=...' POST.
-Returns plist (:tracks LIST :next TOKEN-OR-NIL)."
+Returns plist (:tracks LIST :next TOKEN-OR-NIL).  Handles the legacy
+`continuationContents' shape (library shelves) and the newer
+`onResponseReceivedActions' / `appendContinuationItemsAction' shape
+(playlists, including Liked Music), whose next token rides on a
+trailing `continuationItemRenderer'."
   (let* ((cc (plist-get response :continuationContents))
          (shelf (or (plist-get cc :musicPlaylistShelfContinuation)
                     (plist-get cc :musicShelfContinuation)))
-         (contents (and shelf (plist-get shelf :contents)))
-         (next (and shelf (youtube-music--get-in
-                           shelf [:continuations 0 :nextContinuationData
-                                  :continuation])))
+         (appended
+          (unless shelf
+            (cl-loop for action across
+                     (or (plist-get response :onResponseReceivedActions) [])
+                     for items = (youtube-music--get-in
+                                  action [:appendContinuationItemsAction
+                                          :continuationItems])
+                     when items return items)))
+         (contents (if shelf (plist-get shelf :contents) appended))
+         (next (if shelf
+                   (youtube-music--get-in
+                    shelf [:continuations 0 :nextContinuationData
+                           :continuation])
+                 (youtube-music--trailing-continuation-token appended)))
          results)
     (when contents
       (cl-loop for entry across contents
@@ -1995,6 +2024,13 @@ maintainer when reporting issues."
          (goto-char (point-min)))
        (pop-to-buffer buf)))))
 
+(defconst youtube-music--liked-browse-id "VLLM"
+  "Browse ID of the \"Liked Music\" playlist (`?list=LM').
+Deliberately not `FEmusic_liked_videos': that is the Library >
+Songs view, which only lists catalog *songs* and silently drops
+every liked video (official music videos, uploads, live takes),
+so newly liked tracks appeared to be missing.")
+
 ;;;###autoload
 (defun youtube-music-refresh-liked-set ()
   "Fetch the user's liked-songs list (paginated) to refresh the liked set.
@@ -2002,7 +2038,7 @@ This is what powers the thumbs-up indicator on tracks."
   (interactive)
   (message "youtube-music: refreshing liked set...")
   (youtube-music--fetch-all-from-browse-id
-   "FEmusic_liked_videos"
+   youtube-music--liked-browse-id
    (lambda (tracks)
      (cond
       ((eq tracks 'auth-failed) nil)
@@ -2018,7 +2054,7 @@ This is what powers the thumbs-up indicator on tracks."
   (interactive)
   (message "youtube-music: fetching liked songs...")
   (youtube-music--fetch-all-from-browse-id
-   "FEmusic_liked_videos"
+   youtube-music--liked-browse-id
    (lambda (tracks)
      (cond
       ((eq tracks 'auth-failed) nil)
