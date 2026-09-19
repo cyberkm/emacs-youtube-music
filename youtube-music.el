@@ -1692,7 +1692,7 @@ shape (see `youtube-music--trailing-continuation-token')."
 Returns plist (:tracks LIST :next TOKEN-OR-NIL).  Handles the legacy
 `continuationContents' shape (library shelves) and the newer
 `onResponseReceivedActions' / `appendContinuationItemsAction' shape
-(playlists, including Liked Music), whose next token rides on a
+\(playlists, including Liked Music), whose next token rides on a
 trailing `continuationItemRenderer'."
   (let* ((cc (plist-get response :continuationContents))
          (shelf (or (plist-get cc :musicPlaylistShelfContinuation)
