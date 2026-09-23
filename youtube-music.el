@@ -80,7 +80,8 @@
 (defcustom youtube-music-mpv-extra-args
   '("--idle=yes"
     "--no-video"
-    "--no-terminal"
+    "--no-input-terminal"
+    "--quiet"
     "--msg-level=all=warn"
     "--ytdl-format=bestaudio")
   "Additional arguments passed to mpv on startup.
@@ -397,13 +398,14 @@ EVENT is the `process-status' string supplied by Emacs."
   (let ((rid (plist-get msg :request_id))
         (event (plist-get msg :event))
         (err (plist-get msg :error)))
-    (when (and rid err (not (equal err "success")))
-      (message "youtube-music: mpv error: %s" err))
     (cond
      (rid
-      (when-let* ((cb (gethash rid youtube-music--pending-requests)))
-        (remhash rid youtube-music--pending-requests)
-        (funcall cb msg)))
+      (let ((cb (gethash rid youtube-music--pending-requests)))
+        (cond
+         (cb (remhash rid youtube-music--pending-requests)
+             (funcall cb msg))
+         ((and err (not (equal err "success")))
+          (message "youtube-music: mpv error: %s" err)))))
      ((equal event "property-change")
       (youtube-music--apply-property
        (plist-get msg :name)
@@ -893,19 +895,43 @@ original index, which the move does not disturb)."
      ((equal pl   "inf") (push (youtube-music--glyph 'repeat-all) badges)))
     (if badges (concat "  " (string-join (nreverse badges) " ")) "")))
 
+(defun youtube-music--send-or-explain (command explanation)
+  "Send COMMAND to mpv; on failure show EXPLANATION instead of the raw error."
+  (youtube-music--send
+   command
+   (lambda (msg)
+     (let ((err (plist-get msg :error)))
+       (unless (equal err "success")
+         (message "youtube-music: %s" explanation))))))
+
 ;;;###autoload
 (defun youtube-music-next ()
   "Skip to the next track in the playlist."
   (interactive)
   (youtube-music--require-track)
-  (youtube-music--send '("playlist-next" "weak")))
+  (let ((pos (plist-get youtube-music--state :playlist-pos))
+        (count (length youtube-music--playlist-cache)))
+    (if (and (>= pos 0) (> count 0) (>= pos (1- count))
+             (not (equal (plist-get youtube-music--state :loop-playlist) "inf")))
+        (message "youtube-music: already at the last track")
+      (youtube-music--send-or-explain
+       '("playlist-next" "weak")
+       "cannot skip forward right now (last track, or still loading)"))))
 
 ;;;###autoload
 (defun youtube-music-prev ()
-  "Skip to the previous track in the playlist."
+  "Skip to the previous track in the playlist.
+On the first track, restart it instead."
   (interactive)
   (youtube-music--require-track)
-  (youtube-music--send '("playlist-prev" "weak")))
+  (if (and (eql (plist-get youtube-music--state :playlist-pos) 0)
+           (not (equal (plist-get youtube-music--state :loop-playlist) "inf")))
+      (youtube-music--send-or-explain
+       '("seek" 0 "absolute")
+       "already at the first track")
+    (youtube-music--send-or-explain
+     '("playlist-prev" "weak")
+     "cannot skip back right now (first track, or still loading)")))
 
 ;;;###autoload
 (defun youtube-music-seek-forward ()
