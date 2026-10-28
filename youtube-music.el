@@ -83,7 +83,21 @@
     "--no-input-terminal"
     "--quiet"
     "--msg-level=all=warn"
-    "--ytdl-format=bestaudio")
+    "--ytdl-format=bestaudio"
+    ;; yt-dlp 2026.10.21 made `tv_samsung' its first default YouTube
+    ;; client.  YouTube serves that client a pre-roll ad and only
+    ;; accepts the stream URL once the ad's skip offset (~5 s) has
+    ;; elapsed; before that googlevideo answers HTTP 403.  yt-dlp
+    ;; models this as the format's `available_at' and sleeps, but mpv
+    ;; opens the URL immediately, fails, and skips the track.  Drop
+    ;; that client; the remaining defaults (`visionos', `web') return
+    ;; URLs that are valid at once.  `-append' keeps the comma in the
+    ;; value from being parsed as a key/value separator.
+    "--ytdl-raw-options-append=extractor-args=youtube:player_client=default,-tv_samsung"
+    ;; Safety net should another client's URL ever be gated the same
+    ;; way: have ffmpeg retry a 403 with back-off (0+1+3 s) instead of
+    ;; giving up on the first attempt.  No effect when the stream opens.
+    "--stream-lavf-o=reconnect_on_http_error=403,reconnect_delay_max=8")
   "Additional arguments passed to mpv on startup.
 Diagnostics from mpv land in the ` *youtube-music-mpv*' buffer; open
 it with `youtube-music-show-log'."
