@@ -1,4 +1,4 @@
-# youtube-music
+# youtube-music — YouTube Music client for Emacs
 [![MELPA](https://melpa.org/packages/youtube-music-badge.svg)](https://melpa.org/#/youtube-music)
 
 YouTube Music. In Emacs.
@@ -17,7 +17,7 @@ YouTube Music. In Emacs.
 
 ── Sources ──
   s  Search (enqueue)    S  Search (replace)
-  u  Play URL             e  Enqueue URL
+  u  Play URL            e  Enqueue URL
   l  Library (liked, playlists, home)
 
 ── Status ──
